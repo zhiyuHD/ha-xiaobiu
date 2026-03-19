@@ -1,0 +1,25 @@
+[project]
+name = "suning-biu-ha"
+version = "0.1.0"
+description = "Suning biu smart home sms login and session client"
+readme = "README.md"
+authors = [
+  { name = "FaintGhost", email = "zhang.yaowei@live.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=46.0.5",
+  "requests>=2.32.5",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+]
+
+[project.scripts]
+suning-biu-ha = "suning_biu_ha:main"
+
+[build-system]
+requires = ["uv_build>=0.10.10,<0.11.0"]
+build-backend = "uv_build"
