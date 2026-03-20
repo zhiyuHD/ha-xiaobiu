@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import partial
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -25,6 +26,8 @@ from .const import (
   DEFAULT_INTERNATIONAL_CODE,
   DOMAIN,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -150,6 +153,10 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         client_lib.CaptchaSolution(kind="iar", value=session.result.token)
       )
     except client_lib.SuningError:
+      _LOGGER.exception(
+        "Failed to resume Suning SMS flow after IAR verification for flow %s",
+        self.flow_id,
+      )
       # Keep the finished IAR session around so the current external-step URL
       # does not immediately degrade into a 404 if the resumed SMS request fails.
       return self._show_user_form({"base": "cannot_connect"})
@@ -255,17 +262,18 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
       }.get(error.risk_type)
       if self._captcha_kind == "iar":
         self._clear_iar_captcha_session()
-        ticket = await self.hass.async_add_executor_job(
-          self._client.request_iar_verify_code_ticket,
-          self._phone_number,
-        )
         async_create_iar_captcha_session(
           self.hass,
           flow_id=self.flow_id,
-          ticket=ticket,
+          client=self._client,
+          phone_number=self._phone_number,
           script_urls=getattr(self._client, "risk_context_script_urls", None) or None,
         )
       elif self._captcha_kind is None:
+        _LOGGER.error(
+          "Unsupported captcha risk type from Suning while sending SMS: %s",
+          error.risk_type,
+        )
         raise client_lib.SuningError(f"unsupported captcha risk type: {error.risk_type}") from error
       return await self.async_step_captcha()
     return await self.async_step_sms_code()

@@ -1,5 +1,51 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA Post-IAR Cannot Connect Investigation
+
+### Plan
+
+- [x] 解析 `ha6.har`，确认 IAR 成功回调后 flow 实际返回的 step 与错误
+- [x] 对照 `config_flow._async_send_sms(captcha)` 与 runtime `send_sms_code` 路径，定位底层失败原因
+- [x] 实现最小修复，并补回归测试
+- [x] 运行定向验证并回填 tasks / lessons
+
+### Notes
+
+- `ha6.har` 显示：
+  - 手机号提交后正常进入 IAR external step
+  - IAR 页面 `POST /api/suning_biu/iar/...` 已带着非空 `token + detect + dfpToken` 成功回调
+  - 随后的 `GET /api/config/config_entries/flow/{flow_id}` 直接返回 `step_id=user` 且 `errors.base=cannot_connect`
+- 结合当前 `config_flow` 可确认，失败发生在 `async_step_captcha_done()` 恢复 `_async_send_sms(captcha)` 之后，而不是 external-step 生命周期本身
+- 更关键的是，现有实现会在展示 IAR 页面之前就调用 `request_iar_verify_code_ticket()`；但 `ha6.har` 证明浏览器真实 `detect/dfpToken` 直到 IAR 页面回调时才第一次回到 HA 服务端
+- 这意味着旧实现申请的 IAR ticket 必然使用占位风控上下文，而不是当前浏览器实际生成的 `dfpToken`，属于认证链路时序错误
+
+### Review
+
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - 捕获 `isIarVerifyCode` 时不再立刻申请 ticket，而是只创建带 client/phone 上下文的 IAR session
+  - `captcha_done` 恢复失败时补充异常日志，便于下次直接从 HA 日志定位底层错误
+- 已更新 `custom_components/suning_biu/iar_external_view.py`
+  - IAR view 新增 `prepare` 阶段：浏览器先上报 `detect/dfpToken`，HA 再基于这组真实风控上下文申请 IAR ticket
+  - `complete` 阶段要求先成功 `prepare`，否则直接返回 `409 captcha not prepared`
+  - session 现在会保存本轮 `prepared_detect/prepared_dfp_token`，相同上下文下可复用已申请的 ticket
+- 已更新 `src/suning_biu_ha/captcha_bridge.py` 与 vendored 副本
+  - 验证页 JS 改成“先采集风控上下文，再 prepare ticket，再初始化 SnCaptcha，再 complete 回调”的两阶段流程
+  - CLI 本地桥接仍可继续使用预置 ticket，不影响既有命令行行为
+- 已更新测试
+  - `tests/test_home_assistant_component.py` 覆盖 deferred ticket、prepare/complete 两阶段、以及未 prepare 时拒绝 complete 的回归场景
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- 这次修复是基于 `ha6.har` 与当前代码路径做出的工程推断：把 IAR ticket 的申请时机后移到真实浏览器风控上下文到达之后。现有单测已覆盖新时序，但仍需要用户在真实 HA 中复测一次
+- 如果苏宁后续还要求比 `detect/dfpToken` 更多的浏览器态，下一次应该优先从 `iar_external_view` 新增的日志继续定位，而不是再回到 generic `cannot_connect`
+
 ## HA Captcha Session Not Found Regression
 
 ### Plan

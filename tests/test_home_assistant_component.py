@@ -466,6 +466,7 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
       self.risk_context_script_urls = ["https://example.com/fp.js"]
       self.send_sms_calls: list[tuple[str | None, str | None, Any | None]] = []
       self.risk_updates: list[tuple[str | None, str | None]] = []
+      self.request_iar_verify_code_ticket_calls = 0
 
     def send_sms_code(
       self,
@@ -485,6 +486,7 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
         raise CaptchaRequiredError("isIarVerifyCode")
 
     def request_iar_verify_code_ticket(self, _phone_number: str) -> str:
+      self.request_iar_verify_code_ticket_calls += 1
       return "ticket-123"
 
     def update_risk_context(self, *, detect: str | None = None, dfp_token: str | None = None) -> None:
@@ -521,7 +523,11 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
   assert captcha_result["url"].startswith(f"/api/{DOMAIN}/iar/flow-123/")
   session = async_get_iar_captcha_session(flow.hass, "flow-123")
   assert session is not None
+  assert session.ticket is None
+  assert session.client is fake_client
+  assert session.phone_number == "13800000000"
   assert session.script_urls == ["https://example.com/fp.js"]
+  assert fake_client.request_iar_verify_code_ticket_calls == 0
   session.result = IARCaptchaResult(
     token="iar-token",
     detect="browser-detect",
@@ -657,6 +663,15 @@ async def test_iar_captcha_view_serves_page_and_triggers_flow_resume(
   hass.http = FakeHTTP()
   resumed_flows: list[str] = []
   created_tasks: list[Any] = []
+  prepared_risk_contexts: list[tuple[str | None, str | None]] = []
+
+  class FakeClient:
+    def update_risk_context(self, *, detect: str | None = None, dfp_token: str | None = None) -> None:
+      prepared_risk_contexts.append((detect, dfp_token))
+
+    def request_iar_verify_code_ticket(self, phone_number: str) -> str:
+      assert phone_number == "13800000000"
+      return "ticket-123"
 
   async def fake_async_configure(*, flow_id: str) -> None:
     resumed_flows.append(flow_id)
@@ -673,7 +688,8 @@ async def test_iar_captcha_view_serves_page_and_triggers_flow_resume(
   session = async_create_iar_captcha_session(
     hass,
     flow_id="flow-123",
-    ticket="ticket-123",
+    client=FakeClient(),
+    phone_number="13800000000",
     script_urls=["https://example.com/fp.js"],
   )
 
@@ -689,13 +705,33 @@ async def test_iar_captcha_view_serves_page_and_triggers_flow_resume(
   response = await view.get(FakeRequest(), flow_id="flow-123", nonce=session.nonce)
   body = response.body.decode("utf-8")
   assert response.status == 200
-  assert "ticket-123" in body
   assert session.path in body
   assert "https://example.com/fp.js" in body
+  assert "window.__CAPTCHA_PREPARE_URL__" in body
+
+  prepare_response = await view.post(
+    FakeRequest(
+      {
+        "action": "prepare",
+        "detect": "browser-detect",
+        "dfpToken": "browser-dfp",
+      }
+    ),
+    flow_id="flow-123",
+    nonce=session.nonce,
+  )
+  assert prepare_response.status == 200
+  assert json.loads(prepare_response.body.decode("utf-8")) == {
+    "ok": True,
+    "ticket": "ticket-123",
+  }
+  assert prepared_risk_contexts == [("browser-detect", "browser-dfp")]
+  assert session.ticket == "ticket-123"
 
   post_response = await view.post(
     FakeRequest(
       {
+        "action": "complete",
         "token": "iar-token",
         "detect": "browser-detect",
         "dfpToken": "browser-dfp",
@@ -743,6 +779,43 @@ async def test_iar_captcha_view_rejects_missing_risk_context(tmp_path: Path) -> 
   )
 
   assert response.status == 400
+  assert async_get_iar_captcha_session(hass, "flow-123") is not None
+
+
+@pytest.mark.asyncio
+async def test_iar_captcha_view_rejects_complete_before_prepare(tmp_path: Path) -> None:
+  hass = HomeAssistant(str(tmp_path))
+  hass.http = FakeHTTP()
+  hass.config_entries = SimpleNamespace(flow=SimpleNamespace(async_configure=lambda **_kwargs: None))
+
+  session = async_create_iar_captcha_session(
+    hass,
+    flow_id="flow-123",
+  )
+
+  class FakeRequest:
+    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+      self.app = {KEY_HASS: hass}
+      self._payload = payload or {}
+
+    async def json(self) -> dict[str, Any]:
+      return self._payload
+
+  view = SuningIARCaptchaView()
+  response = await view.post(
+    FakeRequest(
+      {
+        "action": "complete",
+        "token": "iar-token",
+        "detect": "browser-detect",
+        "dfpToken": "browser-dfp",
+      }
+    ),
+    flow_id="flow-123",
+    nonce=session.nonce,
+  )
+
+  assert response.status == 409
   assert async_get_iar_captcha_session(hass, "flow-123") is not None
 
 

@@ -18,3 +18,4 @@
 - HA config flow 的“重新开始登录”不能默认加载旧 `.storage` session；哪怕已经清掉短信 ticket，只要旧 cookies 和半登录态还在，新的一轮手机号提交也可能直接 `cannot_connect`。新的登录 flow 应从干净 session 启动，只把 state 文件当作本轮成功后的保存目标
 - 逆向 live app API 时，不能把返回字段名想当然写死在 parser 里；像家庭列表这种接口，线上可能返回 `id` 而不是 `familyId`。一旦 parser 把成功响应误判成格式错误，HA 里就只会表现成模糊的 `cannot_connect`
 - Home Assistant external step 的能力 URL 不能在“恢复后的工作真正完成之前”就提前销毁；否则一旦 `captcha_done` 之类的恢复步骤里抛异常，用户会先看到 flow 500，再看到旧 external-step URL 退化成 `captcha session not found`
+- 当 IAR external step 依赖浏览器生成的 `detect/dfpToken` 时，不能在打开验证码页之前就提前向服务端申请 ticket；否则 ticket 会绑定占位风控上下文，问题只会在用户完成拼图后才暴露成 `cannot_connect`。应先把浏览器风控上下文送回 HA，再由 HA 申请本轮 ticket
