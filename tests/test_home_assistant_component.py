@@ -179,6 +179,94 @@ async def test_user_step_form_no_longer_contains_har_field(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_user_step_clears_stale_sms_login_state_before_starting_new_flow(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class CaptchaRequiredError(Exception):
+    def __init__(self, risk_type: str) -> None:
+      super().__init__(risk_type)
+      self.risk_type = risk_type
+
+  created_clients: list[Any] = []
+
+  class FakeClient:
+    def __init__(self, *, state_path: Path) -> None:
+      self.state_path = state_path
+      self.state = SimpleNamespace(
+        phone_number="13800000000",
+        international_code="0086",
+        risk_type="isIarVerifyCode",
+        sms_ticket="stale-sms-ticket",
+        login_ticket="stale-login-ticket",
+      )
+      self.risk_context_script_urls = []
+      self.reset_calls = 0
+      created_clients.append(self)
+
+    def reset_sms_login_state(self) -> None:
+      self.reset_calls += 1
+      self.state.risk_type = None
+      self.state.sms_ticket = None
+      self.state.login_ticket = None
+
+    def send_sms_code(
+      self,
+      phone_number: str,
+      *,
+      international_code: str | None = None,
+      captcha: Any | None = None,
+    ) -> None:
+      assert phone_number == "13800000000"
+      assert international_code == "0086"
+      assert captcha is None
+      assert self.state.risk_type is None
+      assert self.state.sms_ticket is None
+      assert self.state.login_ticket is None
+      raise CaptchaRequiredError("isIarVerifyCode")
+
+    def request_iar_verify_code_ticket(self, _phone_number: str) -> str:
+      return "ticket-123"
+
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.hass.http = FakeHTTP()
+  flow.context = {"source": config_entries.SOURCE_USER}
+  flow.flow_id = "flow-123"
+
+  monkeypatch.setattr(
+    "custom_components.suning_biu.config_flow.load_client_lib",
+    lambda: SimpleNamespace(
+      SuningError=RuntimeError,
+      CaptchaRequiredError=CaptchaRequiredError,
+      CaptchaSolution=lambda **kwargs: SimpleNamespace(**kwargs),
+      SuningSmartHomeClient=FakeClient,
+    ),
+  )
+  async def fake_async_set_unique_id(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+  monkeypatch.setattr(flow, "async_set_unique_id", fake_async_set_unique_id)
+  monkeypatch.setattr(flow, "_abort_if_unique_id_configured", lambda: None)
+  monkeypatch.setattr(flow, "_abort_existing_user_flows", lambda _unique_id: None)
+
+  result = await flow.async_step_user(
+    {
+      CONF_PHONE_NUMBER: "13800000000",
+      CONF_INTERNATIONAL_CODE: "0086",
+    }
+  )
+
+  assert result["type"] == "external"
+  assert result["step_id"] == "captcha"
+  assert len(created_clients) == 1
+  assert created_clients[0].reset_calls == 1
+  assert created_clients[0].state_path == (
+    tmp_path / ".storage" / "suning_biu_0086_13800000000.json"
+  )
+
+
+@pytest.mark.asyncio
 async def test_user_step_restarts_same_phone_flow_and_clears_old_iar_session(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path: Path,

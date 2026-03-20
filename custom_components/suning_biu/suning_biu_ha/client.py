@@ -353,6 +353,12 @@ class SuningSmartHomeClient:
       self.state.dfp_token = dfp_token
     self._touch_state()
 
+  def reset_sms_login_state(self) -> None:
+    self.state.risk_type = None
+    self.state.sms_ticket = None
+    self.state.login_ticket = None
+    self._touch_state()
+
   def initialize(self) -> LoginPageConfig:
     response = self.session.get(
       DEFAULT_LOGIN_URL,

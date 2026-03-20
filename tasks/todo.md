@@ -1,5 +1,41 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA HAR IAR Loop Investigation
+
+### Plan
+
+- [x] 解析 `ha.har`，提取 `iar-web`、`iarVerifyCodeTicket`、`needVerifyCode.do`、`sendCode.do`、`ids/smartLogin/sms` 等关键请求和响应
+- [x] 对照当前 HA external step 链路与 CLI 成功链路，确认重复弹框的真实根因
+- [x] 实现最小修复，并补充覆盖 HAR 发现问题的回归测试
+- [x] 运行定向验证并回填 tasks / lessons
+
+### Notes
+
+- `ha.har` 证明浏览器侧只成功回传了一次 `token + detect + dfpToken`，问题不在前端重复 POST
+- 回调成功后，`GET /api/config/config_entries/flow/{flow_id}` 直接拿到了新的 external step 和新的 IAR ticket，说明是 HA 服务端在续跑 `captcha_done` 后又重新触发了 `CaptchaRequiredError(isIarVerifyCode)`
+- 对照 CLI 成功路径，最显著差异是 CLI 这次使用了新的 `--state-file`，而 HA config flow 会固定复用 `.storage/suning_biu_<code>_<phone>.json`
+- 当前 runtime 会把 `risk_type`、`sms_ticket`、`login_ticket` 这些短信登录临时状态持久化；如果新的 HA flow 直接复用旧状态，就可能在 IAR 完成后继续拿旧 ticket 打 `sendCode.do`，从而再次被要求 IAR
+
+### Review
+
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - 新建 HA user/reauth 登录 flow 初始化 client 后，先同步手机号与区号，再清空旧的 `risk_type`、`sms_ticket`、`login_ticket`
+- 已更新 `src/suning_biu_ha/client.py` 与 vendored 副本
+  - 新增 `reset_sms_login_state()`，只清理短信登录瞬时状态，不动 cookies 和已采集的风险上下文
+- 已补充回归测试
+  - `tests/test_home_assistant_component.py` 新增用例，验证新 HA flow 启动前会清掉持久化的旧短信登录状态
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- 这次修的是“新 HA 登录 flow 不再复用旧的短信临时票据”；如果苏宁服务端后续在同一轮 fresh flow 里仍返回二次 `isIarVerifyCode`，还需要继续补服务端日志或新 HAR
+- CLI 目前仍保留跨命令复用 state file 的能力；如果用户用同一个 state file 反复尝试失败登录，CLI 侧后续也可能需要同样的“显式重置短信临时状态”入口
+
 ## HA IAR Duplicate Resume Guard
 
 ### Plan

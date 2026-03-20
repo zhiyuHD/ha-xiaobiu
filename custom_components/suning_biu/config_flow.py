@@ -299,6 +299,9 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._phone_number,
       ),
     )
+    self._client.state.phone_number = self._phone_number
+    self._client.state.international_code = self._international_code
+    self._client.reset_sms_login_state()
     return client_lib, None
 
   def _family_schema(self) -> vol.Schema:

@@ -14,3 +14,4 @@
 - Home Assistant `external step` 页面被用户直接关掉时，HA 不会自动结束原 config flow；如果后续允许用户“重新开始”，必须在新的 user flow 入口主动接管并 abort 同 `unique_id` 的旧 flow，否则会长期卡在 `already_in_progress`
 - 当 IAR 成功后仍重复弹验证码时，不能默认是 flow 生命周期问题；要先验证浏览器侧 `detect` / `dfpToken` 是否真的采集成功。拿不到完整风控上下文时，必须显式报错并停止重试，不能静默继续发起下一轮 IAR
 - 第三方验证码 success callback 不能假设只触发一次；只要 success 回调会驱动 HA `async_configure(flow_id)` 之类的续跑逻辑，就必须在浏览器端和服务端都做幂等保护，否则一次成功可能被放大成多次 flow 恢复和重复页面
+- 对需要持久化会话的登录 runtime，不能把 `risk_type`、`sms_ticket`、`login_ticket` 这类短信登录瞬时状态无差别复用于下一次 HA config flow；新登录流程启动前必须主动清空这些临时票据，否则用户会看到“本轮滑块已通过，但服务端继续要求新一轮 IAR”
