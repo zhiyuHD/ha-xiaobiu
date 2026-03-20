@@ -642,7 +642,7 @@ class SuningSmartHomeClient:
     for item in raw_families:
       if not isinstance(item, dict):
         raise SuningError("家庭列表项返回格式不正确。")
-      family_id = item.get("familyId")
+      family_id = item.get("familyId", item.get("id"))
       family_name = item.get("familyName")
       if family_id is None or family_name is None:
         raise SuningError("家庭列表项缺少 familyId 或 familyName。")

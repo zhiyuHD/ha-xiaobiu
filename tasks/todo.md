@@ -1,5 +1,46 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA Full Flow Cannot Connect Investigation
+
+### Plan
+
+- [x] 解析 `ha2.har`，提取从添加集成到报错的完整 flow 请求链
+- [x] 确认 `连接苏宁失败` 对应的具体 `step_id` 和失败边界
+- [x] 对照当前 HA `config_flow` 与 runtime 登录/家庭列表逻辑，定位根因并实现最小修复
+- [x] 补回归测试、运行定向验证并回填 tasks / lessons
+
+### Notes
+
+- `ha2.har` 明确显示：
+  - 手机号提交成功，进入 IAR external step
+  - IAR 回调成功，flow 正常进入 `sms_code`
+  - 短信验证码提交后，flow 仍停留在 `sms_code`，但 `errors.base = cannot_connect`
+- 这意味着失败点不在验证码链路，而是在 `async_step_sms_code()` 里 `login_with_sms_code()` 成功之后的“拉家庭列表”阶段
+- 进一步用成功的 CLI 登录态做对照时，`uv run main.py families --state-file .suning-session.login-test.json` 先前也会失败；说明根因在共享 runtime，而不是 HA 专属逻辑
+- 实际线上 `queryAllFamily` 返回的 `responseData` 是数组，家庭主键字段为 `id`，而不是当前代码硬编码的 `familyId`
+- 因此 `list_family_infos()` 会把成功响应误判成“家庭列表项缺少 familyId 或 familyName”，最终在 HA 中被映射成 `cannot_connect`
+
+### Review
+
+- 已更新 `src/suning_biu_ha/client.py` 与 vendored 副本
+  - `list_family_infos()` 现在优先读取 `familyId`，缺失时回退到 live API 的 `id`
+- 已更新测试
+  - `tests/test_client.py` 新增 live API 形状回归测试，覆盖 `responseData: [{id, familyName}]`
+- 已做真实链路对照
+  - 修复前失败的 `uv run main.py families --state-file .suning-session.login-test.json`，修复后已能成功返回家庭列表 JSON
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run main.py families --state-file .suning-session.login-test.json`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- 当前修复只覆盖了 `familyId -> id` 这一处真实返回差异；如果苏宁后续在设备列表或控制接口里也有类似字段漂移，还需要继续按 live payload 兼容
+- HA 里从 `sms_code` 进入 `family` 步骤之后，下一阶段还可能暴露新的 live payload 差异，但这次 `cannot_connect` 的根因已经被独立验证解决
+
 ## HA SMS Submit Failure Investigation
 
 ### Plan

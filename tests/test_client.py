@@ -535,6 +535,29 @@ def test_list_family_infos_parses_expected_payload_shape(monkeypatch) -> None:
   assert families[0].name == "我的家"
 
 
+def test_list_family_infos_accepts_id_field_from_live_api(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+
+  def fake_list_families() -> dict[str, object]:
+    return {
+      "responseCode": "0",
+      "responseData": [
+        {
+          "id": 37790,
+          "familyName": "139******39的家",
+        }
+      ],
+    }
+
+  monkeypatch.setattr(client, "list_families", fake_list_families)
+
+  families = client.list_family_infos()
+
+  assert len(families) == 1
+  assert families[0].family_id == "37790"
+  assert families[0].name == "139******39的家"
+
+
 def test_list_air_conditioner_statuses_filters_non_climate_devices(monkeypatch) -> None:
   client = SuningSmartHomeClient()
 
