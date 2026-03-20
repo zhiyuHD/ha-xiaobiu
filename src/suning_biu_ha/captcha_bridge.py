@@ -67,6 +67,27 @@ HTML_TEMPLATE = """<!doctype html>
       width: 100%;
       overflow: visible;
     }}
+    .actions {{
+      margin-top: 12px;
+      display: flex;
+      justify-content: center;
+    }}
+    .start-btn {{
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #ff8a00 0%, #ff6a00 100%);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      padding: 12px 22px;
+      cursor: pointer;
+      box-shadow: 0 10px 24px rgba(255, 122, 0, 0.24);
+    }}
+    .start-btn[disabled] {{
+      cursor: wait;
+      opacity: 0.72;
+      box-shadow: none;
+    }}
     #captcha {{
       width: 100%;
       min-height: 320px;
@@ -102,15 +123,19 @@ HTML_TEMPLATE = """<!doctype html>
 <body>
   <div class="card">
     <h1>苏宁拼图验证</h1>
-    <p>完成下方验证后，这个页面会自动把结果回传给本地程序。成功后回到终端等待后续提示即可。</p>
+    <p>完成下方验证后，这个页面会自动把结果回传给本地程序。请先点击下方按钮开始验证。</p>
+    <div class="actions">
+      <button id="start-captcha" class="start-btn" type="button">开始验证</button>
+    </div>
     <div class="captcha-shell">
       <div id="captcha"></div>
     </div>
-    <div id="status" class="status">正在加载验证码...</div>
+    <div id="status" class="status">请点击下方按钮开始验证。</div>
   </div>
   <script>
     const statusEl = document.getElementById("status");
     const cardEl = document.querySelector(".card");
+    const startButtonEl = document.getElementById("start-captcha");
     const riskContextScripts = window.__RISK_CONTEXT_SCRIPT_URLS__ || [];
     const callbackUrl = window.__CAPTCHA_CALLBACK_URL__ || "/callback";
     async function loadScript(src) {{
@@ -176,57 +201,87 @@ HTML_TEMPLATE = """<!doctype html>
       statusEl.textContent = message;
       statusEl.className = "status" + (klass ? " " + klass : "");
     }}
+    function setStartButtonState(disabled, label) {{
+      startButtonEl.disabled = disabled;
+      startButtonEl.textContent = label;
+    }}
+    async function startCaptcha() {{
+      if (captchaLaunchStarted) {{
+        return;
+      }}
+      captchaLaunchStarted = true;
+      setStartButtonState(true, "正在准备...");
+      riskContextPromise = collectRiskContext();
+      try {{
+        setStatus("正在准备浏览器风控环境...", "");
+        await riskContextPromise;
+        setStatus("正在初始化验证码...", "");
+        SnCaptcha.init({{
+          env: "{env}",
+          target: "captcha",
+          ticket: "{ticket}",
+          client: "app",
+          width: captchaSize.width,
+          height: captchaSize.height,
+          callback: async function(token) {{
+            if (captchaSubmitStarted) {{
+              return;
+            }}
+            captchaSubmitStarted = true;
+            try {{
+              setStatus("验证成功，正在回传结果...", "");
+              const riskContext = await riskContextPromise;
+              if (!riskContext.detect || !riskContext.dfpToken) {{
+                throw new Error("浏览器风控上下文不完整，请刷新页面后重试。");
+              }}
+              const response = await fetch(callbackUrl, {{
+                method: "POST",
+                headers: {{
+                  "Content-Type": "application/json"
+                }},
+                body: JSON.stringify({{
+                  token,
+                  detect: riskContext.detect,
+                  dfpToken: riskContext.dfpToken
+                }})
+              }});
+              if (!response.ok) {{
+                throw new Error("回传失败: " + response.status);
+              }}
+              setStatus("验证成功，已经回传给本地程序。可以回到终端继续。", "ok");
+            }} catch (error) {{
+              captchaSubmitStarted = false;
+              setStatus("验证码已完成，但回传失败，请把浏览器和终端错误一起反馈。\\n" + error, "err");
+            }}
+          }},
+          onready: function() {{
+            setStatus("验证码已加载，请按页面提示完成验证。", "");
+            setStartButtonState(true, "验证进行中");
+          }},
+          onClose: function() {{
+            if (captchaSubmitStarted) {{
+              return;
+            }}
+            setStatus("验证码窗口已关闭，如未成功请重新点击开始验证。", "");
+            captchaLaunchStarted = false;
+            setStartButtonState(false, "重新开始验证");
+          }}
+        }});
+      }} catch (error) {{
+        captchaLaunchStarted = false;
+        riskContextPromise = null;
+        setStartButtonState(false, "重新开始验证");
+        setStatus("验证码初始化失败，请刷新页面后重试。\\n" + error, "err");
+      }}
+    }}
     let captchaSubmitStarted = false;
+    let captchaLaunchStarted = false;
     const captchaSize = computeCaptchaSize();
     const captchaEl = document.getElementById("captcha");
     captchaEl.style.width = captchaSize.width;
     captchaEl.style.minHeight = captchaSize.height;
-    const riskContextPromise = collectRiskContext();
-    SnCaptcha.init({{
-      env: "{env}",
-      target: "captcha",
-      ticket: "{ticket}",
-      client: "app",
-      width: captchaSize.width,
-      height: captchaSize.height,
-      callback: async function(token) {{
-        if (captchaSubmitStarted) {{
-          return;
-        }}
-        captchaSubmitStarted = true;
-        try {{
-          setStatus("验证成功，正在回传结果...", "");
-          const riskContext = await riskContextPromise;
-          if (!riskContext.detect || !riskContext.dfpToken) {{
-            throw new Error("浏览器风控上下文不完整，请刷新页面后重试。");
-          }}
-          const response = await fetch(callbackUrl, {{
-            method: "POST",
-            headers: {{
-              "Content-Type": "application/json"
-            }},
-            body: JSON.stringify({{
-              token,
-              detect: riskContext.detect,
-              dfpToken: riskContext.dfpToken
-            }})
-          }});
-          if (!response.ok) {{
-            throw new Error("回传失败: " + response.status);
-          }}
-          setStatus("验证成功，已经回传给本地程序。可以回到终端继续。", "ok");
-        }} catch (error) {{
-          captchaSubmitStarted = false;
-          setStatus("验证码已完成，但回传失败，请把浏览器和终端错误一起反馈。\\n" + error, "err");
-        }}
-      }},
-      onready: function() {{
-        setStatus("验证码已加载，请按页面提示完成验证。", "");
-      }},
-      onClose: function() {{
-        setStatus("验证码窗口已关闭，如未成功请重新打开终端输出的链接。", "");
-      }}
-    }});
+    let riskContextPromise = null;
+    startButtonEl.addEventListener("click", startCaptcha);
   </script>
 </body>
 </html>

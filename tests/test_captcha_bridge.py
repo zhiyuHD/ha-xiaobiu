@@ -22,6 +22,9 @@ def test_local_captcha_bridge_serves_ticket_and_accepts_callback() -> None:
     assert "mmds.suning.com/mmds/mmds.js" in html
     assert "未能采集浏览器风控上下文" in html
     assert "captchaSubmitStarted" in html
+    assert "请点击下方按钮开始验证。" in html
+    assert 'id="start-captcha"' in html
+    assert 'startButtonEl.addEventListener("click"' in html
 
     request = Request(
       bridge.url + "callback",

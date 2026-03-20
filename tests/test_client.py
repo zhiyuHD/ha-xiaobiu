@@ -15,12 +15,14 @@ from suning_biu_ha.client import (
   MOBILE_SMS_LOGIN_REMEMBER_ME_TYPE,
   MOBILE_SMS_LOGIN_SCENE_ID,
   SignedRequestTemplate,
+  SmsRateLimitedError,
   _air_conditioner_status_payload,
   _build_gs_sign,
   _build_parser,
   _captcha_kind_from_risk_type,
   _send_sms_with_optional_prompt,
   extract_risk_context_script_urls,
+  main as client_main,
   parse_login_page_config,
 )
 from suning_biu_ha.crypto import SuAESCipher
@@ -473,6 +475,65 @@ def test_send_sms_code_uses_mobile_iar_payload(monkeypatch) -> None:
   assert result == expected_inner
   assert client.state.login_ticket == "login-ticket"
   assert client.state.risk_type is None
+
+
+def test_send_sms_code_raises_sms_rate_limited_error(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  cipher = SuAESCipher()
+  client.state.phone_number = "13800000000"
+  client.state.sms_ticket = "sms-ticket"
+  client.state.risk_type = "isIarVerifyCode"
+
+  expected_inner = {
+    "status": "FAIL",
+    "msg": "验证码发送失败，请稍后重试(00201)",
+  }
+
+  class FakeResponse:
+    text = json.dumps(
+      {
+        "_x_rdsy_resp_": cipher.encrypt(
+          json.dumps(expected_inner, separators=(",", ":"), ensure_ascii=False)
+        )
+      },
+      ensure_ascii=False,
+    )
+
+    def raise_for_status(self) -> None:
+      return None
+
+  monkeypatch.setattr(client.session, "post", lambda *args, **kwargs: FakeResponse())
+
+  try:
+    client.send_sms_code(
+      captcha=CaptchaSolution(kind="iar", value="iar-token"),
+    )
+  except Exception as error:  # noqa: BLE001
+    assert error.__class__.__name__ == "SmsRateLimitedError"
+    assert str(error) == "验证码发送失败，请稍后重试(00201)"
+  else:
+    raise AssertionError("expected sms send to fail with rate limited error")
+
+
+def test_login_main_reports_sms_rate_limited(monkeypatch, capsys) -> None:
+  fake_client = object()
+
+  monkeypatch.setattr("suning_biu_ha.client._client_from_args", lambda _args: fake_client)
+  monkeypatch.setattr(
+    "suning_biu_ha.client._interactive_login",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      SmsRateLimitedError("验证码发送失败，请稍后重试(00201)")
+    ),
+  )
+
+  exit_code = client_main(["login", "--phone", "13800000000"])
+
+  payload = json.loads(capsys.readouterr().out)
+  assert exit_code == 1
+  assert payload["status"] == "sms_rate_limited"
+  assert payload["errorCode"] == "00201"
+  assert payload["message"] == "短信发送过于频繁，请稍后再试。"
+  assert payload["detail"] == "验证码发送失败，请稍后重试(00201)"
 
 
 def test_login_with_sms_code_uses_mobile_post_form(monkeypatch) -> None:

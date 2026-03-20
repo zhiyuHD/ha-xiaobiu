@@ -1,6 +1,7 @@
 from .client import (
   AuthenticationError,
   CaptchaRequiredError,
+  SmsRateLimitedError,
   SuningError,
   SuningSmartHomeClient,
   main,
@@ -25,6 +26,7 @@ __all__ = [
   "FamilyInfo",
   "HAClimatePreview",
   "LoginPageConfig",
+  "SmsRateLimitedError",
   "SignedRequestTemplate",
   "SuningError",
   "SuningSmartHomeClient",

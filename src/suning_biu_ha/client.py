@@ -50,6 +50,7 @@ MOBILE_SMS_LOGIN_THEME = "zn"
 MOBILE_SMS_LOGIN_APP_VERSION = "6.4.5"
 MOBILE_SMS_LOGIN_SUB_MODE = "11"
 MOBILE_SMS_LOGIN_REMEMBER_ME_TYPE = "app"
+SMS_RATE_LIMIT_ERROR_CODE = "00201"
 MEMBER_BASE_INFO_URL = "https://shcss.suning.com/shcss-web/api/member/queryMemberBaseInfo.do"
 FAMILY_LIST_URL = "https://itapig.suning.com/api/trade/shcss/queryAllFamily"
 DEVICE_LIST_URL = "https://itapig.suning.com/api/trade/shcss/all"
@@ -103,6 +104,12 @@ class CaptchaRequiredError(SuningError):
     self.sms_ticket = sms_ticket
 
 
+class SmsRateLimitedError(SuningError):
+  def __init__(self, message: str, *, error_code: str = SMS_RATE_LIMIT_ERROR_CODE) -> None:
+    super().__init__(message)
+    self.error_code = error_code
+
+
 class AuthenticationError(SuningError):
   pass
 
@@ -117,6 +124,21 @@ def parse_jsonp_or_json(payload: str) -> dict[str, Any]:
   if not match:
     raise SuningError(f"unable to parse jsonp payload: {text[:120]!r}")
   return json.loads(match.group(1))
+
+
+def _extract_business_error_code(*values: Any) -> str | None:
+  for value in values:
+    if value is None:
+      continue
+    text = str(value).strip()
+    if not text:
+      continue
+    if re.fullmatch(r"\d{5}", text):
+      return text
+    match = re.search(r"\((\d{5})\)\s*$", text)
+    if match:
+      return match.group(1)
+  return None
 
 
 def parse_login_page_config(html: str) -> LoginPageConfig:
@@ -471,7 +493,17 @@ class SuningSmartHomeClient:
         inner.get("msg") or "captcha is required again",
         self.state.sms_ticket,
       )
-    raise SuningError(inner.get("msg") or "failed to send sms code")
+    message = inner.get("msg") or "failed to send sms code"
+    error_code = _extract_business_error_code(
+      inner.get("code"),
+      inner.get("resCode"),
+      inner.get("errCode"),
+      inner.get("errorCode"),
+      message,
+    )
+    if error_code == SMS_RATE_LIMIT_ERROR_CODE:
+      raise SmsRateLimitedError(message, error_code=error_code)
+    raise SuningError(message)
 
   def request_iar_verify_code_ticket(self, phone_number: str) -> str:
     response = self.session.post(
@@ -1380,7 +1412,7 @@ def _obtain_iar_captcha_result(
   )
   bridge.start()
   try:
-    print("请在浏览器打开以下链接完成苏宁拼图验证：")
+    print("请在浏览器打开以下链接。进入页面后，请先点击“开始验证”，再完成苏宁拼图验证：")
     print(bridge.url)
     print("验证完成后，终端会自动继续。")
     result = bridge.wait_for_token(timeout=300.0)
@@ -1505,6 +1537,16 @@ def main(argv: list[str] | None = None) -> int:
       }
     )
     return 2
+  except SmsRateLimitedError as error:
+    _print_payload(
+      {
+        "status": "sms_rate_limited",
+        "errorCode": error.error_code,
+        "message": "短信发送过于频繁，请稍后再试。",
+        "detail": str(error),
+      }
+    )
+    return 1
   except SuningError as error:
     _print_payload(
       {

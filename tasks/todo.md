@@ -813,3 +813,57 @@
 
 - 自动化已覆盖当前回滚边界，但真实有效性仍需要你在 Home Assistant 中重新手工走一遍 IAR -> 短信发送 -> 提交验证码
 - 如果手工回归后仍出现 `00201`，下一步应直接以 HA 后端日志为主线继续定位，而不是重新引入 deferred-ticket 时序
+
+## CLI SMS Throttle Hint And Manual Captcha Launch
+
+### Plan
+
+- [x] 为 `00201` 短信限流场景补红灯测试，锁定 runtime 错误分类与 CLI 输出
+- [x] 为验证码桥接页补红灯测试，锁定“手动点击后才开始验证”的页面契约
+- [x] 在 shared runtime 中实现短信限流独立错误与 CLI 单独提示
+- [x] 在 shared captcha bridge 中实现手动启动按钮，并同步 vendored 副本
+- [x] 运行 `tests/test_client.py`、`tests/test_captcha_bridge.py`、`compileall` 和副本一致性检查
+
+### Notes
+
+- 用户实测 `uv run main.py login --phone ...` 在 IAR 成功后拿到 `验证码发送失败，请稍后重试(00201)`，更像短信限流而不是验证码链路再次失败
+- 进一步检查代码后确认：
+  - `send_sms_code()` 会把所有非 `COMPLETE` / 非 `R0004` 的结果统一抛成 `SuningError`
+  - 验证码 bridge 页会在 HTML 加载后立即执行 `SnCaptcha.init(...)`，没有给用户手动开始的机会
+
+### Review
+
+- 已更新 `src/suning_biu_ha/client.py` 与 vendored 副本
+  - 新增 `SmsRateLimitedError`
+  - `send_sms_code()` 现在会从响应字段和消息尾部提取业务码，遇到 `00201` 时抛出独立异常
+  - CLI `main()` 单独捕获该异常，输出：
+    - `status = "sms_rate_limited"`
+    - `errorCode = "00201"`
+    - 更明确的中文重试提示
+  - CLI 在提示打开 IAR 页面时，新增“先点击开始验证”的引导文案
+- 已更新 `src/suning_biu_ha/captcha_bridge.py` 与 vendored 副本
+  - 页面增加“开始验证”按钮
+  - 初始状态不再自动 `SnCaptcha.init(...)`
+  - 用户点击后才开始采集风险上下文并初始化验证码
+  - 保留成功回传、缺少风险上下文报错和 `captchaSubmitStarted` 幂等保护
+- 已更新测试
+  - `tests/test_client.py` 新增：
+    - `send_sms_code()` 对 `00201` 的错误分类断言
+    - CLI `main()` 输出 `sms_rate_limited` 状态断言
+  - `tests/test_captcha_bridge.py` 新增：
+    - 手动启动按钮与点击绑定断言
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py -q -k "rate_limit or sms_rate_limited"`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall src/suning_biu_ha custom_components/suning_biu/suning_biu_ha tests`
+- `diff -u src/suning_biu_ha/client.py custom_components/suning_biu/suning_biu_ha/client.py`
+- `diff -u src/suning_biu_ha/captcha_bridge.py custom_components/suning_biu/suning_biu_ha/captcha_bridge.py`
+
+### Risks
+
+- `00201` 的“发送过于频繁”语义来自现有服务端文案和业务经验，当前没有更细的官方 retry-after 字段；CLI 只能提示“稍后再试”，不能给出精确等待时长
+- 本轮只把“是否自动开始验证”改成了显式点击，不改变苏宁 IAR 脚本本身的交互形态；如果后续还有浏览器端异常，仍需要看真实页面行为
