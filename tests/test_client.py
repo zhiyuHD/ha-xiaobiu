@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import unquote_plus
 
 from suning_biu_ha import SuningSmartHomeClient, parse_jsonp_or_json
 from suning_biu_ha.client import (
+  CaptchaRequiredError,
   CaptchaSolution,
   DEVICE_LIST_URL,
   FAMILY_LIST_URL,
+  MOBILE_SMS_LOGIN_APP_CODE,
+  MOBILE_SMS_LOGIN_CHANNEL,
+  MOBILE_SMS_LOGIN_ORDER_CHANNEL,
+  MOBILE_SMS_LOGIN_REMEMBER_ME_TYPE,
+  MOBILE_SMS_LOGIN_SCENE_ID,
   SignedRequestTemplate,
   _air_conditioner_status_payload,
   _build_gs_sign,
   _build_parser,
   _captcha_kind_from_risk_type,
+  _send_sms_with_optional_prompt,
+  extract_risk_context_script_urls,
   parse_login_page_config,
 )
+from suning_biu_ha.crypto import SuAESCipher
+from suning_biu_ha.models import CaptchaBridgeResult
 
 SAMPLE_LOGIN_PAGE = """
 <script>
@@ -40,6 +51,20 @@ def test_parse_login_page_config() -> None:
   assert config.check_account_key == "CHECK_ACCOUNT_KEY"
 
 
+def test_extract_risk_context_script_urls() -> None:
+  html_text = """
+  <script src="https://mmds.suning.com/mmds/mmds.js?appCode=qEmt9X4YmoV2Vye8"></script>
+  <script src="https://oss.suning.com/mmds/mmds/js/hash/mmds.bundle.js"></script>
+  <script src="https://dfp.suning.com/dfprs-collect/dist/fp.js?appCode=qEmt9X4YmoV2Vye8"></script>
+  """
+
+  assert extract_risk_context_script_urls(html_text) == [
+    "https://mmds.suning.com/mmds/mmds.js?appCode=qEmt9X4YmoV2Vye8",
+    "https://oss.suning.com/mmds/mmds/js/hash/mmds.bundle.js",
+    "https://dfp.suning.com/dfprs-collect/dist/fp.js?appCode=qEmt9X4YmoV2Vye8",
+  ]
+
+
 def test_parse_jsonp_or_json_supports_both_formats() -> None:
   assert parse_jsonp_or_json('{"code":"0"}') == {"code": "0"}
   assert parse_jsonp_or_json('smsLogin({"code":"0"})') == {"code": "0"}
@@ -64,6 +89,49 @@ def test_captcha_field_mapping() -> None:
   fields = client._captcha_fields(CaptchaSolution(kind="iar", value="token"))  # noqa: SLF001
   assert fields["uuid"] == "iarVerifyCode"
   assert fields["code"] == "token"
+
+
+def test_mobile_captcha_field_mapping() -> None:
+  client = SuningSmartHomeClient()
+  fields = client._mobile_captcha_fields(CaptchaSolution(kind="iar", value="token"))  # noqa: SLF001
+  assert fields["uuid"] == ""
+  assert fields["code"] == "token"
+  assert "iarVerifyCode" not in fields
+
+
+def test_send_sms_with_iar_updates_risk_context(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  client.state.detect = "passport_detect_js_is_error"
+  client.state.dfp_token = "passport_dfpToken_js_is_error"
+  attempts: list[tuple[str, str, str | None]] = []
+
+  def fake_send_sms_code(phone_number: str, *, international_code: str | None = None, captcha=None):
+    attempts.append((client.state.detect, client.state.dfp_token, captcha.value if captcha else None))
+    if len(attempts) == 1:
+      raise CaptchaRequiredError("isIarVerifyCode", "need captcha")
+    return {"status": "COMPLETE", "phone": phone_number, "internationalCode": international_code}
+
+  monkeypatch.setattr(client, "send_sms_code", fake_send_sms_code)
+  monkeypatch.setattr(
+    "suning_biu_ha.client._obtain_iar_captcha_result",
+    lambda *_args, **_kwargs: CaptchaBridgeResult(
+      token="iar-token",
+      detect="browser-detect",
+      dfp_token="browser-dfp",
+    ),
+  )
+
+  result = _send_sms_with_optional_prompt(
+    client,
+    phone_number="13800000000",
+    international_code="0086",
+  )
+
+  assert result["status"] == "COMPLETE"
+  assert attempts == [
+    ("passport_detect_js_is_error", "passport_dfpToken_js_is_error", None),
+    ("browser-detect", "browser-dfp", "iar-token"),
+  ]
 
 
 def test_login_cli_allows_interactive_sms_code() -> None:
@@ -296,6 +364,153 @@ def test_list_devices_builds_dynamic_signed_request(monkeypatch) -> None:
     kwargs["data"],
   )
   assert payload["responseCode"] == "0"
+
+
+def test_prepare_sms_login_uses_mobile_post_form(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  cipher = SuAESCipher()
+  captured: dict[str, object] = {}
+
+  monkeypatch.setattr(client, "initialize", lambda: client.config)
+
+  expected_inner = {
+    "status": "COMPLETE",
+    "data": {
+      "ticket": "sms-ticket",
+      "riskType": "isIarVerifyCode",
+    },
+  }
+
+  class FakeResponse:
+    text = json.dumps(
+      {
+        "_x_rdsy_resp_": cipher.encrypt(
+          json.dumps(expected_inner, separators=(",", ":"), ensure_ascii=False)
+        )
+      },
+      ensure_ascii=False,
+    )
+
+    def raise_for_status(self) -> None:
+      return None
+
+  def fake_post(url: str, **kwargs):
+    captured["url"] = url
+    captured["kwargs"] = kwargs
+    payload = kwargs["data"]
+    block = payload["_x_rdsy_block_"]
+    captured["request_json"] = json.loads(cipher.decrypt(unquote_plus(block)))
+    return FakeResponse()
+
+  monkeypatch.setattr(client.session, "post", fake_post)
+
+  result = client.prepare_sms_login("13800000000")
+
+  request_json = captured["request_json"]
+  kwargs = captured["kwargs"]
+  assert captured["url"] == "https://rdsy.suning.com/rdsy/needVerifyCode.do"
+  assert kwargs["data"]["callback"] == ""
+  assert kwargs["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+  assert request_json["sceneId"] == MOBILE_SMS_LOGIN_SCENE_ID
+  assert request_json["appCode"] == MOBILE_SMS_LOGIN_APP_CODE
+  assert request_json["data"]["channel"] == MOBILE_SMS_LOGIN_CHANNEL
+  assert request_json["data"]["orderChannel"] == MOBILE_SMS_LOGIN_ORDER_CHANNEL
+  assert request_json["data"]["subMode"] == "11"
+  assert request_json["data"]["loginTheme"] == "zn"
+  assert result == expected_inner
+
+
+def test_send_sms_code_uses_mobile_iar_payload(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  cipher = SuAESCipher()
+  client.state.phone_number = "13800000000"
+  client.state.sms_ticket = "sms-ticket"
+  client.state.risk_type = "isIarVerifyCode"
+  captured: dict[str, object] = {}
+
+  expected_inner = {
+    "status": "COMPLETE",
+    "data": {"ticket": "login-ticket"},
+  }
+
+  class FakeResponse:
+    text = json.dumps(
+      {
+        "_x_rdsy_resp_": cipher.encrypt(
+          json.dumps(expected_inner, separators=(",", ":"), ensure_ascii=False)
+        )
+      },
+      ensure_ascii=False,
+    )
+
+    def raise_for_status(self) -> None:
+      return None
+
+  def fake_post(url: str, **kwargs):
+    captured["url"] = url
+    captured["kwargs"] = kwargs
+    payload = kwargs["data"]
+    block = payload["_x_rdsy_block_"]
+    captured["request_json"] = json.loads(cipher.decrypt(unquote_plus(block)))
+    return FakeResponse()
+
+  monkeypatch.setattr(client.session, "post", fake_post)
+
+  result = client.send_sms_code(
+    captcha=CaptchaSolution(kind="iar", value="iar-token"),
+  )
+
+  request_json = captured["request_json"]
+  kwargs = captured["kwargs"]
+  assert captured["url"] == "https://rdsy.suning.com/rdsy/sendCode.do"
+  assert kwargs["data"]["callback"] == ""
+  assert request_json["sceneId"] == MOBILE_SMS_LOGIN_SCENE_ID
+  assert request_json["appCode"] == MOBILE_SMS_LOGIN_APP_CODE
+  assert request_json["riskType"] == "isIarVerifyCode"
+  assert request_json["uuid"] == ""
+  assert request_json["code"] == "iar-token"
+  assert "iarVerifyCode" not in request_json
+  assert result == expected_inner
+  assert client.state.login_ticket == "login-ticket"
+  assert client.state.risk_type is None
+
+
+def test_login_with_sms_code_uses_mobile_post_form(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  client.state.phone_number = "13800000000"
+  client.state.international_code = "0086"
+  client.state.login_ticket = "login-ticket"
+  captured: dict[str, object] = {}
+
+  class FakeResponse:
+    text = json.dumps({"res_message": "SUCCESS", "res_code": "0"}, ensure_ascii=False)
+
+    def raise_for_status(self) -> None:
+      return None
+
+  def fake_post(url: str, **kwargs):
+    captured["url"] = url
+    captured["kwargs"] = kwargs
+    return FakeResponse()
+
+  monkeypatch.setattr(client.session, "post", fake_post)
+  monkeypatch.setattr(client, "bootstrap_service", lambda service_name: {"service": service_name})
+
+  result = client.login_with_sms_code(
+    phone_number="13800000000",
+    sms_code="123456",
+  )
+
+  params = captured["kwargs"]["data"]
+  assert captured["url"] == "https://passport.suning.com/ids/smartLogin/sms"
+  assert captured["kwargs"]["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+  assert params["sceneId"] == MOBILE_SMS_LOGIN_SCENE_ID
+  assert params["terminal"] == MOBILE_SMS_LOGIN_CHANNEL
+  assert params["loginChannel"] == MOBILE_SMS_LOGIN_ORDER_CHANNEL
+  assert params["rememberMeType"] == MOBILE_SMS_LOGIN_REMEMBER_ME_TYPE
+  assert params["stepFlag"] == client.config.step_three_flag
+  assert "callback" not in params
+  assert result["res_code"] == "0"
 
 
 def test_list_family_infos_parses_expected_payload_shape(monkeypatch) -> None:

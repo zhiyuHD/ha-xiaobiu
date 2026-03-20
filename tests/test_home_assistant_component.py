@@ -259,6 +259,108 @@ async def test_reauth_sms_code_step_updates_existing_entry(
   assert fake_client.keep_alive_called is True
 
 
+@pytest.mark.asyncio
+async def test_iar_captcha_step_updates_risk_context_before_retry(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class SuningError(Exception):
+    pass
+
+  class CaptchaRequiredError(Exception):
+    def __init__(self, risk_type: str) -> None:
+      super().__init__(risk_type)
+      self.risk_type = risk_type
+
+  class FakeBridge:
+    def __init__(self, *, ticket: str, script_urls: list[str] | None = None) -> None:
+      self.ticket = ticket
+      self.script_urls = script_urls
+      self.url = "http://127.0.0.1:43127/"
+      self.started = False
+      self.closed = False
+
+    def start(self) -> None:
+      self.started = True
+
+    def wait_for_token(self, _timeout: float) -> Any:
+      return SimpleNamespace(
+        token="iar-token",
+        detect="browser-detect",
+        dfp_token="browser-dfp",
+      )
+
+    def close(self) -> None:
+      self.closed = True
+
+  class FakeClient:
+    def __init__(self) -> None:
+      self.risk_context_script_urls = ["https://example.com/fp.js"]
+      self.send_sms_calls: list[tuple[str | None, str | None, Any | None]] = []
+      self.risk_updates: list[tuple[str | None, str | None]] = []
+
+    def send_sms_code(
+      self,
+      phone_number: str,
+      *,
+      international_code: str | None = None,
+      captcha: Any | None = None,
+    ) -> None:
+      self.send_sms_calls.append(
+        (
+          getattr(self, "detect", None),
+          getattr(self, "dfp_token", None),
+          captcha,
+        )
+      )
+      if captcha is None:
+        raise CaptchaRequiredError("isIarVerifyCode")
+
+    def request_iar_verify_code_ticket(self, _phone_number: str) -> str:
+      return "ticket-123"
+
+    def update_risk_context(self, *, detect: str | None = None, dfp_token: str | None = None) -> None:
+      self.detect = detect
+      self.dfp_token = dfp_token
+      self.risk_updates.append((detect, dfp_token))
+
+  fake_client = FakeClient()
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.context = {"source": config_entries.SOURCE_USER}
+  flow._client = fake_client
+  flow._phone_number = "13800000000"
+  flow._international_code = "0086"
+
+  monkeypatch.setattr(
+    "custom_components.suning_biu.config_flow.load_client_lib",
+    lambda: SimpleNamespace(
+      SuningError=SuningError,
+      CaptchaRequiredError=CaptchaRequiredError,
+      LocalCaptchaBridge=FakeBridge,
+      CaptchaSolution=lambda **kwargs: SimpleNamespace(**kwargs),
+    ),
+  )
+  async def fake_async_step_sms_code(*_args, **_kwargs: Any) -> dict[str, Any]:
+    return {"type": "form", "step_id": "sms_code"}
+
+  monkeypatch.setattr(flow, "async_step_sms_code", fake_async_step_sms_code)
+
+  captcha_result = await flow._async_send_sms()  # noqa: SLF001
+  assert captcha_result["step_id"] == "captcha"
+  assert isinstance(flow._captcha_bridge, FakeBridge)
+  assert flow._captcha_bridge.script_urls == ["https://example.com/fp.js"]
+
+  result = await flow.async_step_captcha({})
+
+  assert result == {"type": "form", "step_id": "sms_code"}
+  assert fake_client.risk_updates == [("browser-detect", "browser-dfp")]
+  assert len(fake_client.send_sms_calls) == 2
+  assert fake_client.send_sms_calls[1][0:2] == ("browser-detect", "browser-dfp")
+  assert fake_client.send_sms_calls[1][2].kind == "iar"
+  assert fake_client.send_sms_calls[1][2].value == "iar-token"
+
+
 def test_climate_entity_exposes_expected_state() -> None:
   status = SimpleNamespace(
     device_id="ac-1",

@@ -1,5 +1,62 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## SMS IAR Loop Fix
+
+### Plan
+
+- [x] 核对 `new.har`、成功 HAR 与 live 登录页脚本，确认 IAR 循环的真实根因
+- [x] 扩展本地验证码桥接页，让浏览器把 `token`、`detect`、`dfpToken` 一起回传
+- [x] 在 CLI 的 IAR 重试路径中覆盖风控上下文，再次发起 `sendCode.do`
+- [x] 同步 vendored runtime，补充单测并运行验证
+- [x] 回填修复结论、验证结果与剩余风险
+
+### Notes
+
+- `new.har` 里只有 `iar-web/init.json`、`iar-web/validate.json` 和浏览器侧 `dfprs-collect` 请求，没有 `sendCode.do`
+- 登录页 live 脚本已确认：
+  - `getDetect()` 实际调用 `bd.rst({ scene: "1" })`
+  - `getDfpToken()` 实际调用 `_dfp.getToken()`
+- 当前 CLI 在 IAR 成功后仍继续使用 `passport_*_js_is_error` 占位值，才是重复要求验证的关键原因
+
+### Review
+
+- 已更新 `src/suning_biu_ha/captcha_bridge.py`
+  - 桥接页现在会额外加载登录页所需的 `mmds` / `fp` 风控脚本
+  - IAR 完成后会把 `token`、浏览器侧 `detect`、浏览器侧 `dfpToken` 一起回传给本地进程
+- 已更新 `src/suning_biu_ha/client.py`
+  - `initialize()` 现在会从登录页提取当前可用的风控脚本 URL，避免桥接页硬编码依赖单一版本路径
+  - IAR 验证完成后，CLI 会先用浏览器回传的 `detect/dfpToken` 覆盖风险上下文，再重试 `sendCode.do`
+  - `login_with_sms_code()` 也会继续复用同一份已更新的风险上下文
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - Home Assistant config flow 的 IAR 分支现在会保留桥接页返回的 `detect/dfpToken`
+  - 短信重试前会先更新 client 的风险上下文，避免 HA 内重复进入 IAR 循环
+- 已更新 `src/suning_biu_ha/models.py`
+  - `CaptchaBridgeResult` 现在除 `token` 外，还携带 `detect` 与 `dfp_token`
+- 已同步 vendored runtime
+  - `custom_components/suning_biu/suning_biu_ha/{client.py,captcha_bridge.py,models.py}` 与 `src/` 保持一致
+- 已更新用户文档与版本信息
+  - `README.md` 已补齐 codebase 摘要、HA 测试步骤与 IAR 风控修复后的实际行为
+  - `custom_components/suning_biu/manifest.json` 版本提升到 `0.1.4`
+- 已新增/更新测试
+  - `tests/test_captcha_bridge.py` 覆盖桥接页回传 `detect` / `dfpToken`
+  - `tests/test_client.py` 覆盖 IAR 成功后风险上下文覆盖逻辑，以及登录页脚本 URL 提取
+  - `tests/test_home_assistant_component.py` 覆盖 HA config flow 在 IAR 成功后会更新风险上下文再重试短信发送
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_captcha_bridge.py tests/test_client.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall src/suning_biu_ha custom_components/suning_biu/suning_biu_ha tests`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest -q`
+- 本地桥接页冒烟验证
+  - 启动 `LocalCaptchaBridge(ticket='ticket-test')`
+  - 用 `agent-browser` 打开 `http://127.0.0.1:<port>/`
+  - 在页面上下文执行 `await collectRiskContext()`，已拿到非空 `detect` 与 `dfpToken`
+
+### Risks
+
+- 本轮修复依赖网页登录页当前暴露的 `mmds` / `fp` 脚本接口；若苏宁后续替换 `bd.rst` 或 `_dfp.getToken()` 的全局入口，需要重新适配
+- 当前还没有对真实手机号做一次完整短信发送成功的无人工自动化验证，最终闭环仍需用户再跑一遍 `uv run main.py login --phone ...` 实测
+
 ## Manifest Private Requirement Fix
 
 ### Plan
@@ -287,5 +344,43 @@
 - 已完成验证
   - `env UV_CACHE_DIR=/tmp/uv-cache uv run pytest`
   - `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall src`
-  - `env UV_CACHE_DIR=/tmp/uv-cache uv run main.py device-status --family-id 37790`
-  - `env UV_CACHE_DIR=/tmp/uv-cache uv run main.py keep-alive`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run main.py device-status --family-id 37790`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run main.py keep-alive`
+
+## Android SMS Login Alignment
+
+### Plan
+
+- [x] 对照 HAR 与当前 CLI 登录实现，确认 IAR 循环验证的根因
+- [x] 将 `needVerifyCode.do`、`sendCode.do`、`ids/smartLogin/sms` 调整为已验证的 MOBILE/xiaobiu 请求参数
+- [x] 补充针对 MOBILE 验证码字段与 POST form 请求的测试
+- [x] 运行 Python 3.14 / Home Assistant 全量验证，确认未引入回归
+
+### Notes
+
+- 用户实测 `uv run main.py login --phone ...` 时，IAR 拼图完成后仍然反复要求再次验证
+- HAR 已证明当前可用链路不是 PC 网页参数，而是 `PASSPORT_XIAOBIU` + `MOBILE` 的请求形态
+
+### Review
+
+- 已更新 `src/suning_biu_ha/client.py`
+  - `prepare_sms_login()` / `send_sms_code()` 改为 `POST application/x-www-form-urlencoded`
+  - 国内手机号默认走 `MOBILE` 登录参数
+  - 新增 `MOBILE_SMS_LOGIN_*` 常量、`_mobile_sms_login_data()`、`_build_*_payload()` 辅助方法
+  - IAR 验证码字段改为真实链路格式：`code=<token>` 且 `uuid=""`
+  - `login_with_sms_code()` 改为对齐 HAR 的 `ids/smartLogin/sms` POST 表单参数
+- 已同步更新 vendored runtime
+  - `custom_components/suning_biu/suning_biu_ha/client.py`
+- 已新增客户端回归测试
+  - `tests/test_client.py` 新增 MOBILE `needVerifyCode`、`sendCode`、`smartLogin/sms` 的参数断言
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest -q`
+
+### Risks
+
+- 当前只能通过 HAR 和单测确认“请求形态”已经对齐；由于实时 IAR 拼图需要人工参与，本轮未能在自动化里完整跑通一次真实短信发送
+- `00852` 等非大陆区号目前仍保留旧网页登录参数分支，后续若要全面移动端化，需要单独抓样本确认

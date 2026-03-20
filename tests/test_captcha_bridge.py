@@ -16,10 +16,18 @@ def test_local_captcha_bridge_serves_ticket_and_accepts_callback() -> None:
     assert "SnCaptcha.init" in html
     assert "align-items: flex-start" in html
     assert "computeCaptchaSize" in html
+    assert "window.__RISK_CONTEXT_SCRIPT_URLS__" in html
+    assert "mmds.suning.com/mmds/mmds.js" in html
 
     request = Request(
       bridge.url + "callback",
-      data=json.dumps({"token": "token-456"}).encode("utf-8"),
+      data=json.dumps(
+        {
+          "token": "token-456",
+          "detect": "browser-detect",
+          "dfpToken": "browser-dfp",
+        }
+      ).encode("utf-8"),
       headers={"Content-Type": "application/json"},
       method="POST",
     )
@@ -29,5 +37,7 @@ def test_local_captcha_bridge_serves_ticket_and_accepts_callback() -> None:
 
     result = bridge.wait_for_token(timeout=0.5)
     assert result.token == "token-456"
+    assert result.detect == "browser-detect"
+    assert result.dfp_token == "browser-dfp"
   finally:
     bridge.close()

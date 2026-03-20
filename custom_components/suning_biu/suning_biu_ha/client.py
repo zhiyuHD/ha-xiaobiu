@@ -42,6 +42,14 @@ DEFAULT_APP_USER_AGENT = "SmartHome/6.4.7 (Android; Android 14; Scale/3.00)"
 DEFAULT_APP_TERMINAL_TYPE = "SHCSS_ANDROID"
 DEFAULT_APP_ACCEPT_LANGUAGE = "zh-Hans-US;q=1, zh-Hant-US;q=0.9, en-US;q=0.8, ja-US;q=0.7"
 APP_API_GS_SIGN_SECRET = "ad71cef5-c46a-48f7-a810-61f4be3a207a"
+MOBILE_SMS_LOGIN_APP_CODE = "7b8e1574afdd47a8a14766c4f003cff7"
+MOBILE_SMS_LOGIN_SCENE_ID = "PASSPORT_XIAOBIU"
+MOBILE_SMS_LOGIN_CHANNEL = "MOBILE"
+MOBILE_SMS_LOGIN_ORDER_CHANNEL = "208000201090"
+MOBILE_SMS_LOGIN_THEME = "zn"
+MOBILE_SMS_LOGIN_APP_VERSION = "6.4.5"
+MOBILE_SMS_LOGIN_SUB_MODE = "11"
+MOBILE_SMS_LOGIN_REMEMBER_ME_TYPE = "app"
 MEMBER_BASE_INFO_URL = "https://shcss.suning.com/shcss-web/api/member/queryMemberBaseInfo.do"
 FAMILY_LIST_URL = "https://itapig.suning.com/api/trade/shcss/queryAllFamily"
 DEVICE_LIST_URL = "https://itapig.suning.com/api/trade/shcss/all"
@@ -131,6 +139,23 @@ def parse_login_page_config(html: str) -> LoginPageConfig:
     check_account_key=extract(r'checkAccountKey:\s*"([^"]+)"', "checkAccountKey"),
   )
   return config
+
+
+def extract_risk_context_script_urls(html_text: str) -> list[str]:
+  patterns = [
+    r'<script[^>]+src="(https://mmds\.suning\.com/mmds/mmds\.js[^"]+)"',
+    r'<script[^>]+src="(https://oss\.suning\.com/mmds/mmds/js/[^"]+\.js)"',
+    r'<script[^>]+src="(https://dfp\.suning\.com/dfprs-collect/dist/fp\.js[^"]+)"',
+  ]
+  urls: list[str] = []
+  for pattern in patterns:
+    match = re.search(pattern, html_text, re.I)
+    if not match:
+      continue
+    url = html.unescape(match.group(1))
+    if url not in urls:
+      urls.append(url)
+  return urls
 
 
 def _normalize_url(url: str) -> str:
@@ -311,6 +336,7 @@ class SuningSmartHomeClient:
     self.config = DEFAULT_LOGIN_PAGE_CONFIG
     self.state = AuthState()
     self.signed_templates: dict[tuple[str, str, str], SignedRequestTemplate] = {}
+    self.risk_context_script_urls: list[str] = []
     if detect:
       self.state.detect = detect
     if dfp_token:
@@ -337,6 +363,9 @@ class SuningSmartHomeClient:
       self.config = parse_login_page_config(response.text)
     except SuningError:
       self.config = DEFAULT_LOGIN_PAGE_CONFIG
+    script_urls = extract_risk_context_script_urls(response.text)
+    if script_urls:
+      self.risk_context_script_urls = script_urls
     self._touch_state()
     return self.config
 
@@ -349,35 +378,24 @@ class SuningSmartHomeClient:
     self.initialize()
     self.state.phone_number = phone_number
     self.state.international_code = international_code
-    request_body = {
-      "sceneId": self._scene_id(international_code),
-      "stepFlag": self.config.step_flag,
-      "appCode": self.config.rdsy_app_code,
-      "data": {
-        "ways": "duanxindl",
-        "channel": self.config.channel,
-        "orderChannel": self._channel(international_code),
-        "dfpToken": self.state.dfp_token,
-        "detect": self.state.detect,
-        "loginTheme": "defaultTheme",
-        "referenceURL": DEFAULT_LOGIN_URL,
-        "userName": phone_number,
-        "cntctMobileNum": phone_number,
-        "mode": "1",
-        "subMode": "4",
-      },
-    }
+    request_body = self._build_prepare_sms_login_payload(
+      phone_number=phone_number,
+      international_code=international_code,
+    )
     payload = {
       "_x_rdsy_block_": self.suaes.encrypt(
         json.dumps(request_body, separators=(",", ":"), ensure_ascii=False)
       ),
-      "callback": self._jsonp_callback("needVerifyCode"),
+      "callback": self._rdsy_callback(international_code, "needVerifyCode"),
     }
-    response = self.session.get(
+    response = self.session.post(
       "https://rdsy.suning.com/rdsy/needVerifyCode.do",
-      params=payload,
+      data=payload,
       timeout=self.timeout,
-      headers={"Referer": DEFAULT_LOGIN_URL},
+      headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": DEFAULT_LOGIN_URL,
+      },
     )
     response.raise_for_status()
     outer = parse_jsonp_or_json(response.text)
@@ -408,49 +426,32 @@ class SuningSmartHomeClient:
         "captcha token is required before sending sms code",
         self.state.sms_ticket,
       )
-    params: dict[str, Any] = {
-      "sceneId": self._scene_id(area_code),
-      "stepFlag": self.config.step_two_flag,
-      "appCode": self.config.rdsy_app_code,
-      "riskType": self.state.risk_type or "",
-      "phoneNum": rsa_encrypt_base64(target_phone, self.config.rdsy_key),
-      "internationalCode": area_code,
-      "callback": self._jsonp_callback("sendCode"),
-      "ticket": self.state.sms_ticket or "",
-      "code": "",
-      "uuid": "",
-      "data": {
-        "ways": "duanxindl",
-        "channel": self.config.channel,
-        "orderChannel": self._channel(area_code),
-        "dfpToken": self.state.dfp_token,
-        "detect": self.state.detect,
-        "loginTheme": "defaultTheme",
-        "userName": target_phone,
-        "cntctMobileNum": target_phone,
-        "checkAliasName": "0",
-        "referenceURL": DEFAULT_LOGIN_URL,
-      },
-    }
-    if captcha:
-      params.update(self._captcha_fields(captcha))
+    params = self._build_send_sms_code_payload(
+      phone_number=target_phone,
+      international_code=area_code,
+      captcha=captcha,
+    )
     payload = {
       "_x_rdsy_block_": self.suaes.encrypt(
         json.dumps(params, separators=(",", ":"), ensure_ascii=False)
       ),
-      "callback": params["callback"],
+      "callback": self._rdsy_callback(area_code, "sendCode"),
     }
-    response = self.session.get(
+    response = self.session.post(
       "https://rdsy.suning.com/rdsy/sendCode.do",
-      params=payload,
+      data=payload,
       timeout=self.timeout,
-      headers={"Referer": DEFAULT_LOGIN_URL},
+      headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": DEFAULT_LOGIN_URL,
+      },
     )
     response.raise_for_status()
     outer = parse_jsonp_or_json(response.text)
     inner = self._decrypt_rdsy_response(outer)
     if inner.get("status") == "COMPLETE":
       self.state.login_ticket = inner["data"].get("ticket")
+      self.state.risk_type = None
       self._touch_state()
       return inner
     if inner.get("code") == "R0004":
@@ -498,47 +499,23 @@ class SuningSmartHomeClient:
     area_code = international_code or self.state.international_code
     if not self.state.login_ticket:
       raise SuningError("login ticket is missing, send sms code first")
-    params = {
-      "callback": self._jsonp_callback("smsLogin"),
-      "ticket": self.state.login_ticket,
-      "phoneNumber": rsa_encrypt_base64(target_phone, self.config.check_account_key),
-      "internationalCode": area_code,
-      "channel": self.config.channel,
-      "smsCode": sms_code,
-      "rememberMe": "true",
-      "type": "1",
-      "sceneId": self._scene_id(area_code),
-      "targetUrl": DEFAULT_TARGET_URL,
-      "service": "",
-      "detect": self.state.detect,
-      "secondFlag": "100000000010",
-      "dfpToken": self.state.dfp_token,
-      "terminal": self.config.channel,
-      "createChannel": self._channel(area_code),
-      "loginChannel": self._channel(area_code),
-      "smsCodeVersion": "1.0",
-      "jsonViewType": "true",
-      "viewType": "json",
-      "loginOrRegFlag": "0",
-      "version": "2.0",
-    }
-    response = self.session.get(
+    params = self._build_sms_login_payload(
+      phone_number=target_phone,
+      sms_code=sms_code,
+      international_code=area_code,
+    )
+    response = self.session.post(
       "https://passport.suning.com/ids/smartLogin/sms",
-      params=params,
+      data=params,
       timeout=self.timeout,
-      headers={"Referer": DEFAULT_LOGIN_URL},
+      headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": DEFAULT_LOGIN_URL,
+      },
     )
     response.raise_for_status()
     data = parse_jsonp_or_json(response.text)
-    if data.get("code") == 302 and data.get("location"):
-      location = (
-        data["location"]
-        .replace("callback=smsLogin", "")
-        .replace("viewType=json", "")
-        .replace("jsonViewType=true", "")
-      )
-      self.session.get(location, timeout=self.timeout, allow_redirects=True)
-    elif not self._is_login_success(data):
+    if not self._is_login_success(data):
       raise AuthenticationError(data.get("msg") or data.get("res_message") or "sms login failed")
     self.state.login_response = data
     self._touch_state()
@@ -1002,6 +979,161 @@ class SuningSmartHomeClient:
     self.state.updated_at = time.time()
     self.save_state()
 
+  def _uses_mobile_sms_login(self, international_code: str) -> bool:
+    return international_code == "0086"
+
+  def _mobile_sms_login_data(self, phone_number: str) -> dict[str, str]:
+    return {
+      "mode": "1",
+      "subMode": MOBILE_SMS_LOGIN_SUB_MODE,
+      "channel": MOBILE_SMS_LOGIN_CHANNEL,
+      "dfpToken": self.state.dfp_token,
+      "orderChannel": MOBILE_SMS_LOGIN_ORDER_CHANNEL,
+      "custType": "0",
+      "ways": "duanxindl",
+      "userName": phone_number,
+      "source": "",
+      "token": "",
+      "detect": self.state.detect,
+      "referenceURL": "",
+      "miniType": "",
+      "result": "",
+      "cntctMobileNum": phone_number,
+      "loginTheme": MOBILE_SMS_LOGIN_THEME,
+      "appVersion": MOBILE_SMS_LOGIN_APP_VERSION,
+      "openId": "",
+    }
+
+  def _build_prepare_sms_login_payload(
+    self,
+    *,
+    phone_number: str,
+    international_code: str,
+  ) -> dict[str, Any]:
+    if self._uses_mobile_sms_login(international_code):
+      return {
+        "sceneId": MOBILE_SMS_LOGIN_SCENE_ID,
+        "stepFlag": self.config.step_flag,
+        "appCode": MOBILE_SMS_LOGIN_APP_CODE,
+        "data": self._mobile_sms_login_data(phone_number),
+      }
+    return {
+      "sceneId": self._scene_id(international_code),
+      "stepFlag": self.config.step_flag,
+      "appCode": self.config.rdsy_app_code,
+      "data": {
+        "ways": "duanxindl",
+        "channel": self.config.channel,
+        "orderChannel": self._channel(international_code),
+        "dfpToken": self.state.dfp_token,
+        "detect": self.state.detect,
+        "loginTheme": "defaultTheme",
+        "referenceURL": DEFAULT_LOGIN_URL,
+        "userName": phone_number,
+        "cntctMobileNum": phone_number,
+        "mode": "1",
+        "subMode": "4",
+      },
+    }
+
+  def _build_send_sms_code_payload(
+    self,
+    *,
+    phone_number: str,
+    international_code: str,
+    captcha: CaptchaSolution | None,
+  ) -> dict[str, Any]:
+    if self._uses_mobile_sms_login(international_code):
+      params: dict[str, Any] = {
+        "sceneId": MOBILE_SMS_LOGIN_SCENE_ID,
+        "stepFlag": self.config.step_two_flag,
+        "appCode": MOBILE_SMS_LOGIN_APP_CODE,
+        "riskType": self.state.risk_type or "",
+        "phoneNum": rsa_encrypt_base64(phone_number, self.config.rdsy_key),
+        "ticket": self.state.sms_ticket or "",
+        "code": "",
+        "uuid": "",
+        "data": self._mobile_sms_login_data(phone_number),
+      }
+      if captcha:
+        params.update(self._mobile_captcha_fields(captcha))
+      return params
+    params = {
+      "sceneId": self._scene_id(international_code),
+      "stepFlag": self.config.step_two_flag,
+      "appCode": self.config.rdsy_app_code,
+      "riskType": self.state.risk_type or "",
+      "phoneNum": rsa_encrypt_base64(phone_number, self.config.rdsy_key),
+      "internationalCode": international_code,
+      "callback": self._jsonp_callback("sendCode"),
+      "ticket": self.state.sms_ticket or "",
+      "code": "",
+      "uuid": "",
+      "data": {
+        "ways": "duanxindl",
+        "channel": self.config.channel,
+        "orderChannel": self._channel(international_code),
+        "dfpToken": self.state.dfp_token,
+        "detect": self.state.detect,
+        "loginTheme": "defaultTheme",
+        "userName": phone_number,
+        "cntctMobileNum": phone_number,
+        "checkAliasName": "0",
+        "referenceURL": DEFAULT_LOGIN_URL,
+      },
+    }
+    if captcha:
+      params.update(self._captcha_fields(captcha))
+    return params
+
+  def _build_sms_login_payload(
+    self,
+    *,
+    phone_number: str,
+    sms_code: str,
+    international_code: str,
+  ) -> dict[str, str]:
+    if self._uses_mobile_sms_login(international_code):
+      return {
+        "appVersion": MOBILE_SMS_LOGIN_APP_VERSION,
+        "detect": self.state.detect,
+        "dfpToken": self.state.dfp_token,
+        "jsonViewType": "true",
+        "loginChannel": MOBILE_SMS_LOGIN_ORDER_CHANNEL,
+        "phoneNumber": rsa_encrypt_base64(phone_number, self.config.check_account_key),
+        "rememberMe": "true",
+        "rememberMeType": MOBILE_SMS_LOGIN_REMEMBER_ME_TYPE,
+        "sceneId": MOBILE_SMS_LOGIN_SCENE_ID,
+        "smsCode": sms_code,
+        "stepFlag": self.config.step_three_flag,
+        "terminal": MOBILE_SMS_LOGIN_CHANNEL,
+        "ticket": self.state.login_ticket,
+      }
+    return {
+      "callback": self._jsonp_callback("smsLogin"),
+      "ticket": self.state.login_ticket,
+      "phoneNumber": rsa_encrypt_base64(phone_number, self.config.check_account_key),
+      "internationalCode": international_code,
+      "channel": self.config.channel,
+      "smsCode": sms_code,
+      "rememberMe": "true",
+      "type": "1",
+      "sceneId": self._scene_id(international_code),
+      "targetUrl": DEFAULT_TARGET_URL,
+      "service": "",
+      "detect": self.state.detect,
+      "secondFlag": "100000000010",
+      "dfpToken": self.state.dfp_token,
+      "terminal": self.config.channel,
+      "createChannel": self._channel(international_code),
+      "loginChannel": self._channel(international_code),
+      "smsCodeVersion": "1.0",
+      "jsonViewType": "true",
+      "viewType": "json",
+      "loginOrRegFlag": "0",
+      "version": "2.0",
+    }
+
   def _decrypt_rdsy_response(self, outer_payload: dict[str, Any]) -> dict[str, Any]:
     encrypted = outer_payload.get("_x_rdsy_resp_")
     if not encrypted:
@@ -1013,6 +1145,27 @@ class SuningSmartHomeClient:
       "iar": {
         "uuid": "iarVerifyCode",
         "iarVerifyCode": captcha.value,
+        "code": captcha.value,
+      },
+      "slide": {
+        "uuid": "sillerVerifyCode",
+        "sillerCode": captcha.value,
+        "code": captcha.value,
+      },
+      "image": {
+        "uuid": "19da7909-9b5d-4aee-99ee-28016002eaac",
+        "imgCode": captcha.value,
+        "code": captcha.value,
+      },
+    }
+    if captcha.kind not in mapping:
+      raise SuningError(f"unsupported captcha kind: {captcha.kind}")
+    return mapping[captcha.kind]
+
+  def _mobile_captcha_fields(self, captcha: CaptchaSolution) -> dict[str, str]:
+    mapping = {
+      "iar": {
+        "uuid": "",
         "code": captcha.value,
       },
       "slide": {
@@ -1042,6 +1195,11 @@ class SuningSmartHomeClient:
 
   def _jsonp_callback(self, prefix: str) -> str:
     return f"{prefix}_{int(time.time() * 1000)}"
+
+  def _rdsy_callback(self, international_code: str, prefix: str) -> str:
+    if self._uses_mobile_sms_login(international_code):
+      return ""
+    return self._jsonp_callback(prefix)
 
   def _is_login_success(self, payload: dict[str, Any]) -> bool:
     return bool(
@@ -1189,30 +1347,41 @@ def _send_sms_with_optional_prompt(
           f"发送短信前需要验证码 token，当前风控类型是 {error.risk_type}，将按 {captcha_kind} 处理。"
         )
       if captcha_kind == "iar":
-        captcha_value = _obtain_iar_captcha_token(
+        captcha_result = _obtain_iar_captcha_result(
           client,
           phone_number=phone_number,
         )
+        client.update_risk_context(
+          detect=captcha_result.detect,
+          dfp_token=captcha_result.dfp_token,
+        )
+        captcha_value = captcha_result.token
       else:
         captcha_value = _prompt_nonempty("请输入验证码 token: ")
       active_captcha = CaptchaSolution(kind=captcha_kind, value=captcha_value)
 
 
-def _obtain_iar_captcha_token(
+def _obtain_iar_captcha_result(
   client: SuningSmartHomeClient,
   *,
   phone_number: str,
-) -> str:
+) -> CaptchaBridgeResult:
   iar_ticket = client.request_iar_verify_code_ticket(phone_number)
-  bridge = LocalCaptchaBridge(ticket=iar_ticket)
+  bridge = LocalCaptchaBridge(
+    ticket=iar_ticket,
+    script_urls=client.risk_context_script_urls or None,
+  )
   bridge.start()
   try:
     print("请在浏览器打开以下链接完成苏宁拼图验证：")
     print(bridge.url)
     print("验证完成后，终端会自动继续。")
     result = bridge.wait_for_token(timeout=300.0)
-    print("已收到 IAR 验证结果，继续请求短信。")
-    return result.token
+    if result.detect or result.dfp_token:
+      print("已收到 IAR 验证结果，并回收浏览器风控上下文，继续请求短信。")
+    else:
+      print("已收到 IAR 验证结果，继续请求短信。")
+    return result
   finally:
     bridge.close()
 

@@ -11,5 +11,5 @@ wheels/
 .venv
 
 # Local runtime artifacts
-.suning-session.json
+.suning-session*.json
 *.har

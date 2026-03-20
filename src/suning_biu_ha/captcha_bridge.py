@@ -8,6 +8,11 @@ from typing import Any
 
 from .models import CaptchaBridgeResult
 
+DEFAULT_RISK_CONTEXT_SCRIPT_URLS = [
+  "https://mmds.suning.com/mmds/mmds.js?appCode=qEmt9X4YmoV2Vye8",
+  "https://oss.suning.com/mmds/mmds/js/sK1di3Hh1vIKsdA/mmds.XsWjliU4H7uskWk.js",
+  "https://dfp.suning.com/dfprs-collect/dist/fp.js?appCode=qEmt9X4YmoV2Vye8",
+]
 
 HTML_TEMPLATE = """<!doctype html>
 <html lang="zh-CN">
@@ -16,6 +21,9 @@ HTML_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>苏宁验证码验证</title>
   <script src="https://iar-web.suning.com/iar-web/snstatic/SnCaptcha.js"></script>
+  <script>
+    window.__RISK_CONTEXT_SCRIPT_URLS__ = {script_urls_json};
+  </script>
   <style>
     * {{
       box-sizing: border-box;
@@ -102,6 +110,42 @@ HTML_TEMPLATE = """<!doctype html>
   <script>
     const statusEl = document.getElementById("status");
     const cardEl = document.querySelector(".card");
+    const riskContextScripts = window.__RISK_CONTEXT_SCRIPT_URLS__ || [];
+    async function loadScript(src) {{
+      await new Promise((resolve, reject) => {{
+        const script = document.createElement("script");
+        script.src = src;
+        script.async = false;
+        script.onload = resolve;
+        script.onerror = function() {{
+          reject(new Error("load failed: " + src));
+        }};
+        document.head.appendChild(script);
+      }});
+    }}
+    async function collectRiskContext() {{
+      for (const src of riskContextScripts) {{
+        await loadScript(src);
+      }}
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      let detect = "";
+      let dfpToken = "";
+      try {{
+        if (typeof bd === "object" && typeof bd.rst === "function") {{
+          detect = bd.rst({{ scene: "1" }}) || "";
+        }}
+      }} catch (error) {{
+        console.warn("collect detect failed", error);
+      }}
+      try {{
+        if (typeof _dfp === "object" && typeof _dfp.getToken === "function") {{
+          dfpToken = _dfp.getToken() || "";
+        }}
+      }} catch (error) {{
+        console.warn("collect dfp token failed", error);
+      }}
+      return {{ detect, dfpToken }};
+    }}
     function computeCaptchaSize() {{
       const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 390;
       const availableWidth = Math.max(300, Math.min(viewportWidth - 56, cardEl.clientWidth - 48, 420));
@@ -120,6 +164,10 @@ HTML_TEMPLATE = """<!doctype html>
     const captchaEl = document.getElementById("captcha");
     captchaEl.style.width = captchaSize.width;
     captchaEl.style.minHeight = captchaSize.height;
+    const riskContextPromise = collectRiskContext().catch((error) => {{
+      console.warn("collect risk context failed", error);
+      return {{ detect: "", dfpToken: "" }};
+    }});
     SnCaptcha.init({{
       env: "{env}",
       target: "captcha",
@@ -130,12 +178,17 @@ HTML_TEMPLATE = """<!doctype html>
       callback: async function(token) {{
         try {{
           setStatus("验证成功，正在回传结果...", "");
+          const riskContext = await riskContextPromise;
           const response = await fetch("/callback", {{
             method: "POST",
             headers: {{
               "Content-Type": "application/json"
             }},
-            body: JSON.stringify({{ token }})
+            body: JSON.stringify({{
+              token,
+              detect: riskContext.detect,
+              dfpToken: riskContext.dfpToken
+            }})
           }});
           if (!response.ok) {{
             throw new Error("回传失败: " + response.status);
@@ -169,12 +222,14 @@ class LocalCaptchaBridge:
     env: str = "prd",
     host: str = "127.0.0.1",
     port: int = 0,
+    script_urls: list[str] | None = None,
   ) -> None:
     self.ticket = ticket
     self.env = env
     self.host = host
     self.port = port
-    self._token: str | None = None
+    self.script_urls = script_urls or DEFAULT_RISK_CONTEXT_SCRIPT_URLS
+    self._result: CaptchaBridgeResult | None = None
     self._event = threading.Event()
     self._server = self._create_server()
     self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -189,9 +244,9 @@ class LocalCaptchaBridge:
 
   def wait_for_token(self, timeout: float = 300.0) -> CaptchaBridgeResult:
     completed = self._event.wait(timeout)
-    if not completed or not self._token:
+    if not completed or not self._result:
       raise TimeoutError("等待验证码结果超时")
-    return CaptchaBridgeResult(token=self._token)
+    return self._result
 
   def close(self) -> None:
     self._server.shutdown()
@@ -210,7 +265,11 @@ class LocalCaptchaBridge:
         if self.path != "/":
           self.send_error(HTTPStatus.NOT_FOUND)
           return
-        html = HTML_TEMPLATE.format(env=bridge.env, ticket=bridge.ticket)
+        html = HTML_TEMPLATE.format(
+          env=bridge.env,
+          ticket=bridge.ticket,
+          script_urls_json=json.dumps(bridge.script_urls, ensure_ascii=False),
+        )
         body = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -229,7 +288,11 @@ class LocalCaptchaBridge:
         if not token:
           self.send_error(HTTPStatus.BAD_REQUEST, "missing token")
           return
-        bridge._token = token
+        bridge._result = CaptchaBridgeResult(
+          token=token,
+          detect=(payload.get("detect") or "").strip() or None,
+          dfp_token=(payload.get("dfpToken") or "").strip() or None,
+        )
         bridge._event.set()
         body = json.dumps({"ok": True}).encode("utf-8")
         self.send_response(HTTPStatus.OK)

@@ -7,3 +7,6 @@
 - 移动 App 在 SSL 抓包或 MITM 环境下的登录态稳定性不能默认可靠；登录链路与能力抓包链路要解耦，优先保住可用的 Web 登录，再把 App 抓包用于发现接口与字段
 - Home Assistant 自定义集成不能依赖 private GitHub tarball requirement；config flow 创建前 HA 会先安装 requirements，安装失败会直接让配置向导报 500。运行时代码必须随 `custom_components/<domain>` 一起分发，或只依赖公开可安装的 PyPI 包
 - Home Assistant 普通用户路径不能依赖 HAR 这类抓包产物；如果配置项需要开发者专用输入，优先继续逆向协议或把该能力降为可选调试入口，不能把它做成主流程前提
+- 逆向短信登录/验证码链路时，不能把 PC 网页参数直接套到移动端请求上；像 `needVerifyCode.do` / `sendCode.do` 这类接口，HTTP 方法、`sceneId/appCode/channel` 和验证码字段名只要错一个，就会表现成“验证已完成但服务端持续要求重新验证”
+- 当网页登录页已经能在真实浏览器中生成 `detect` / `dfpToken` 时，CLI 不能继续沿用 `passport_*_js_is_error` 这类占位值；验证码桥接页要把浏览器算出来的风控上下文一并回传，再用于后续风控请求
+- 运行时登录修复如果同时服务 CLI 和 Home Assistant，不能只修 `src/` 或 CLI 入口；必须同步检查 HA `config_flow` / adapter 是否也保留并传递了同一份状态与上下文

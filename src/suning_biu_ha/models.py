@@ -129,3 +129,5 @@ class PersistedSessionState(SuningBaseModel):
 
 class CaptchaBridgeResult(SuningBaseModel):
   token: str
+  detect: str | None = None
+  dfp_token: str | None = None

@@ -236,7 +236,10 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
           self._client.request_iar_verify_code_ticket,
           self._phone_number,
         )
-        self._captcha_bridge = client_lib.LocalCaptchaBridge(ticket=ticket)
+        self._captcha_bridge = client_lib.LocalCaptchaBridge(
+          ticket=ticket,
+          script_urls=getattr(self._client, "risk_context_script_urls", None) or None,
+        )
         self._captcha_bridge.start()
       elif self._captcha_kind is None:
         raise client_lib.SuningError(f"unsupported captcha risk type: {error.risk_type}") from error
@@ -255,6 +258,10 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
       finally:
         self._close_captcha_bridge()
+      self._client.update_risk_context(
+        detect=result.detect,
+        dfp_token=result.dfp_token,
+      )
       return client_lib.CaptchaSolution(kind="iar", value=result.token)
 
     return client_lib.CaptchaSolution(
