@@ -203,6 +203,59 @@
 - 当前 `device-status` 只做保守映射：在线状态、温度、电源、风速/摆风等字段已标准化，但 `mode_raw` 的枚举含义仍未确认，不能安全实现完整 HVAC 模式映射
 - 目前先做到登录、保活与设备列表读取，尚未继续实现空调控制指令
 
+## gsSign Reverse Engineering
+
+### Plan
+
+- [x] 从现有 HAR 中提取全部带 `gsSign` 的请求，以及与之相邻的 `opensh getKey` 样本
+- [x] 验证 `gsSign` 与路径、请求体、`requestTime`、trace 头、`opensh` 返回值之间的关系，排除明显错误假设
+- [x] 若能得到稳定签名方案，则在运行时与 Home Assistant 集成中去掉 HAR 依赖与 `har_path` 配置项
+- [x] 补充针对无 HAR 配置流、家庭列表与设备列表签名的测试
+- [x] 运行 Python 3.14 / Home Assistant 验证并回填结论、剩余风险
+
+### Notes
+
+- 本轮目标不是继续打磨 HAR UX，而是验证是否可以根除 HAR 依赖
+- 根因已经明确：当前家庭/设备列表接口必须带 `gsSign`，而项目目前只能从 HAR 复用现成签名
+- 已从官方 Android APK 逆向出 `SmartHomeBaseJsonTask.getSign(...)`
+  - canonical string: `url=<path>&requestTime=<ms>&data=<body>`
+  - 去掉空格、换行与回车
+  - 使用 `HmacSHA256`，secret 为 `ad71cef5-c46a-48f7-a810-61f4be3a207a`
+- 现有 HAR 样本来自 iOS 端，请求头与 hash 不应再作为 Android 算法的真值断言；实现与测试已改为以 Android 逆向结果为准
+
+### Review
+
+- 已更新 `src/suning_biu_ha/client.py` 与 `custom_components/suning_biu/suning_biu_ha/client.py`
+  - 新增动态 `gsSign` 生成逻辑与 App API 请求头构造
+  - `list_families()` / `list_devices()` 改为运行时签名调用 `itapig`
+  - App 请求显式带 `Content-Type: application/json`、`snTraceId`、`hiro_trace_id`、`snTraceType`
+  - `itapig` 登录跳转时会先尝试重新 bootstrap，再重试请求
+  - 不再在未显式传入 `har_path` 时扫描当前目录下的 `*.har`
+- 已更新 Home Assistant 集成层
+  - `custom_components/suning_biu/config_flow.py` 去掉 `har_path` 输入与 `reconfigure` 流程
+  - `custom_components/suning_biu/__init__.py` setup 不再校验或传入 HAR 路径
+  - 旧 config entry 即使残留 `har_path` 也会被忽略，不再阻塞加载
+- 已更新文案与版本
+  - `custom_components/suning_biu/strings.json` 与 `translations/*.json` 去掉 HAR 相关说明
+  - `custom_components/suning_biu/manifest.json` 版本提升到 `0.1.3`
+  - `README.md` 改为说明 HAR 仅保留为调试 fallback，正常 CLI / HA 流程不再依赖
+- 已补充测试
+  - `tests/test_client.py` 新增 Android `gsSign` 固定样本断言
+  - `tests/test_client.py` 新增动态 family/device 请求头构造覆盖
+  - `tests/test_client.py` 新增“未显式配置时不自动扫描 HAR”覆盖
+  - `tests/test_home_assistant_component.py` 改为覆盖无 HAR setup、无 HAR user flow、family entry 创建与 strings 约束
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_client.py tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest -q`
+
+### Risks
+
+- 目前缺少可复用的 Android 端线上成功抓包样本，`gsSign` 算法来自 APK 逆向，真实可用性主要由单测与请求格式比对保证；若后续苏宁升级 App secret 或 header 约束，需要重新逆向
+- `opensh` / `signInfo` 相关链路仍未接入；当前去 HAR 只覆盖 `families` / `devices`
+
 ## Pydantic Migration
 
 ### Plan

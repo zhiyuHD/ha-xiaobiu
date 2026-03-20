@@ -6,3 +6,4 @@
 - 第三方组件兼容性修复如果没有真实页面验证，不能直接替换已可用实现；先保守回退到已验证路径，再做隔离实验
 - 移动 App 在 SSL 抓包或 MITM 环境下的登录态稳定性不能默认可靠；登录链路与能力抓包链路要解耦，优先保住可用的 Web 登录，再把 App 抓包用于发现接口与字段
 - Home Assistant 自定义集成不能依赖 private GitHub tarball requirement；config flow 创建前 HA 会先安装 requirements，安装失败会直接让配置向导报 500。运行时代码必须随 `custom_components/<domain>` 一起分发，或只依赖公开可安装的 PyPI 包
+- Home Assistant 普通用户路径不能依赖 HAR 这类抓包产物；如果配置项需要开发者专用输入，优先继续逆向协议或把该能力降为可选调试入口，不能把它做成主流程前提

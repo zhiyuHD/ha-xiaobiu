@@ -9,6 +9,7 @@ from suning_biu_ha.client import (
   FAMILY_LIST_URL,
   SignedRequestTemplate,
   _air_conditioner_status_payload,
+  _build_gs_sign,
   _build_parser,
   _captcha_kind_from_risk_type,
   parse_login_page_config,
@@ -116,6 +117,27 @@ def test_signed_request_template_refreshes_trace_headers() -> None:
   assert headers["hiro_trace_id"] == headers["snTraceId"]
 
 
+def test_build_gs_sign_matches_reverse_engineered_android_samples() -> None:
+  assert _build_gs_sign("/api/trade/shcss/queryAllFamily", "1773960376923", "") == (
+    "77942dbc20f6f23c0db611c070c186d0a7132c4d713f34c8e2e5b4aa34aa42f2"
+  )
+  assert _build_gs_sign(
+    "/api/trade/shcss/all",
+    "1773960378601",
+    '{\n  "familyId" : "37790"\n}',
+  ) == "1d6a60bf746cef243d0c3d7c595d172fc71013e707171ffd77fd7f4f87611967"
+
+
+def test_client_does_not_auto_scan_har_files_without_explicit_path(tmp_path, monkeypatch) -> None:
+  har_path = tmp_path / "signed.har"
+  har_path.write_text("{}", encoding="utf-8")
+  monkeypatch.chdir(tmp_path)
+
+  client = SuningSmartHomeClient()
+
+  assert client.signed_templates == {}
+
+
 def test_client_loads_signed_templates_from_har(tmp_path) -> None:
   har_path = tmp_path / "signed.har"
   har_payload = {
@@ -190,6 +212,90 @@ def test_client_loads_signed_templates_from_har(tmp_path) -> None:
   assert device_template is not None
   assert device_template.headers["gsSign"] == "device-sign"
   assert client.available_device_template_family_ids() == ["37790"]
+
+
+def test_list_families_builds_dynamic_signed_request(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  captured: dict[str, object] = {}
+
+  class FakeResponse:
+    status_code = 200
+    headers: dict[str, str] = {}
+
+    def raise_for_status(self) -> None:
+      return None
+
+    def json(self) -> dict[str, object]:
+      return {
+        "responseCode": "0",
+        "responseData": {
+          "families": [{"familyId": "37790", "familyName": "我的家"}],
+        },
+      }
+
+  def fake_request(method: str, url: str, **kwargs):
+    captured["method"] = method
+    captured["url"] = url
+    captured["kwargs"] = kwargs
+    return FakeResponse()
+
+  monkeypatch.setattr(client.session, "request", fake_request)
+
+  payload = client.list_families()
+
+  kwargs = captured["kwargs"]
+  headers = kwargs["headers"]
+  assert captured["method"] == "POST"
+  assert captured["url"] == FAMILY_LIST_URL
+  assert kwargs["data"] == ""
+  assert headers["Content-Type"] == "application/json"
+  assert headers["TerminalVersion"] == client.app_user_agent
+  assert headers["User-Agent"] == client.app_user_agent
+  assert headers["terminalType"] == client.app_terminal_type
+  assert headers["gsSign"] == _build_gs_sign(
+    "/api/trade/shcss/queryAllFamily",
+    headers["requestTime"],
+    kwargs["data"],
+  )
+  assert payload["responseCode"] == "0"
+
+
+def test_list_devices_builds_dynamic_signed_request(monkeypatch) -> None:
+  client = SuningSmartHomeClient()
+  captured: dict[str, object] = {}
+
+  class FakeResponse:
+    status_code = 200
+    headers: dict[str, str] = {}
+
+    def raise_for_status(self) -> None:
+      return None
+
+    def json(self) -> dict[str, object]:
+      return {"responseCode": "0", "responseData": {"devices": []}}
+
+  def fake_request(method: str, url: str, **kwargs):
+    captured["method"] = method
+    captured["url"] = url
+    captured["kwargs"] = kwargs
+    return FakeResponse()
+
+  monkeypatch.setattr(client.session, "request", fake_request)
+
+  payload = client.list_devices("37790")
+
+  kwargs = captured["kwargs"]
+  headers = kwargs["headers"]
+  assert captured["method"] == "POST"
+  assert captured["url"] == DEVICE_LIST_URL
+  assert kwargs["data"] == '{"familyId":"37790"}'
+  assert headers["Content-Type"] == "application/json"
+  assert headers["gsSign"] == _build_gs_sign(
+    "/api/trade/shcss/all",
+    headers["requestTime"],
+    kwargs["data"],
+  )
+  assert payload["responseCode"] == "0"
 
 
 def test_list_family_infos_parses_expected_payload_shape(monkeypatch) -> None:

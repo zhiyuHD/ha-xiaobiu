@@ -10,13 +10,11 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
   ConfigEntryAuthFailed,
-  ConfigEntryError,
   ConfigEntryNotReady,
 )
 
 from .const import (
   CONF_FAMILY_ID,
-  CONF_HAR_PATH,
   CONF_INTERNATIONAL_CODE,
   CONF_PHONE_NUMBER,
   DOMAIN,
@@ -49,23 +47,6 @@ def session_state_path(
   )
 
 
-def resolve_har_path(hass: HomeAssistant, har_path: str) -> Path:
-  candidate = Path(har_path)
-  if not candidate.is_absolute():
-    candidate = Path(hass.config.path(har_path))
-  resolved_path = candidate.resolve()
-  config_dir = Path(hass.config.config_dir).resolve()
-  try:
-    resolved_path.relative_to(config_dir)
-  except ValueError as error:
-    raise ValueError("HAR file must be inside the Home Assistant config directory") from error
-  if resolved_path.suffix.lower() != ".har":
-    raise ValueError("HAR path must point to a .har file")
-  if not resolved_path.is_file():
-    raise ValueError("HAR file must exist")
-  return resolved_path
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: SuningConfigEntry) -> bool:
   phone_number = entry.data[CONF_PHONE_NUMBER]
   international_code = entry.data[CONF_INTERNATIONAL_CODE]
@@ -73,15 +54,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SuningConfigEntry) -> bo
     client_lib = load_client_lib()
   except SuningDependencyError as error:
     raise ConfigEntryNotReady(str(error)) from error
-  try:
-    har_path = resolve_har_path(hass, entry.data[CONF_HAR_PATH])
-  except ValueError as error:
-    raise ConfigEntryError(
-      f"{error}. Reconfigure the integration to update the HAR file path."
-    ) from error
   client = client_lib.SuningSmartHomeClient(
     state_path=session_state_path(hass, international_code, phone_number),
-    har_path=har_path,
   )
   client.state.phone_number = phone_number
   client.state.international_code = international_code

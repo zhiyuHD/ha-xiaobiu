@@ -11,16 +11,15 @@ import pytest
 from homeassistant import config_entries
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from custom_components.suning_biu import async_setup_entry, resolve_har_path
+from custom_components.suning_biu import async_setup_entry
 from custom_components.suning_biu.client_lib import SuningDependencyError, load_client_lib
 from custom_components.suning_biu.climate import SuningClimateEntity, async_setup_entry as climate_async_setup_entry
 from custom_components.suning_biu.config_flow import SuningConfigFlow
 from custom_components.suning_biu.const import (
   CONF_FAMILY_ID,
   CONF_FAMILY_NAME,
-  CONF_HAR_PATH,
   CONF_INTERNATIONAL_CODE,
   CONF_PHONE_NUMBER,
   DOMAIN,
@@ -29,26 +28,14 @@ from custom_components.suning_biu.coordinator import SuningDataUpdateCoordinator
 
 
 @dataclass(slots=True)
-class FakeConfig:
-  config_dir: str
-
-  def path(self, *parts: str) -> str:
-    return str(Path(self.config_dir, *parts))
-
-
-@dataclass(slots=True)
 class FakeConfigEntry:
   data: dict[str, Any]
   entry_id: str = "entry-1"
   runtime_data: Any = None
+  state: Any = config_entries.ConfigEntryState.SETUP_IN_PROGRESS
 
   def async_on_unload(self, _callback: Any) -> None:
     return None
-
-
-@dataclass(slots=True)
-class FakeHassForPath:
-  config: FakeConfig
 
 
 class FakeConfigEntriesManager:
@@ -61,23 +48,6 @@ class FakeConfigEntriesManager:
   async def async_unload_platforms(self, entry: Any, platforms: tuple[Any, ...]) -> bool:
     self.forwarded.append((entry, platforms))
     return True
-
-
-def test_resolve_har_path_requires_existing_file_under_config_dir(tmp_path: Path) -> None:
-  hass = FakeHassForPath(config=FakeConfig(config_dir=str(tmp_path)))
-  har_path = tmp_path / "captures" / "devices.har"
-  har_path.parent.mkdir(parents=True)
-  har_path.write_text("{}", encoding="utf-8")
-
-  assert resolve_har_path(hass, "captures/devices.har") == har_path.resolve()
-
-  with pytest.raises(ValueError, match="must exist"):
-    resolve_har_path(hass, "captures/missing.har")
-
-  outside_path = tmp_path.parent / "outside.har"
-  outside_path.write_text("{}", encoding="utf-8")
-  with pytest.raises(ValueError, match="inside the Home Assistant config directory"):
-    resolve_har_path(hass, str(outside_path))
 
 
 def test_load_client_lib_wraps_runtime_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,17 +72,31 @@ def test_load_client_lib_uses_vendored_runtime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_setup_entry_rejects_missing_har_with_config_entry_error(
+async def test_async_setup_entry_ignores_legacy_har_path_and_initializes_client(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path: Path,
 ) -> None:
+  init_calls: list[dict[str, Any]] = []
+
+  class FakeClient:
+    def __init__(self, *, state_path: Path, har_path: str | None = None) -> None:
+      init_calls.append({"state_path": state_path, "har_path": har_path})
+      self.state = SimpleNamespace(phone_number=None, international_code=None)
+
+    def keep_alive(self) -> None:
+      return None
+
+    def list_air_conditioner_statuses(self, family_id: str) -> list[object]:
+      assert family_id == "37790"
+      return [SimpleNamespace(device_id="ac-1")]
+
   hass = HomeAssistant(str(tmp_path))
   hass.config_entries = FakeConfigEntriesManager()
   entry = FakeConfigEntry(
     data={
       CONF_PHONE_NUMBER: "13800000000",
       CONF_INTERNATIONAL_CODE: "0086",
-      CONF_HAR_PATH: "captures/missing.har",
+      "har_path": "captures/missing.har",
       CONF_FAMILY_ID: "37790",
     }
   )
@@ -120,14 +104,19 @@ async def test_async_setup_entry_rejects_missing_har_with_config_entry_error(
   monkeypatch.setattr(
     "custom_components.suning_biu.load_client_lib",
     lambda: SimpleNamespace(
-      SuningSmartHomeClient=object,
+      SuningSmartHomeClient=FakeClient,
       AuthenticationError=RuntimeError,
       SuningError=RuntimeError,
     ),
   )
 
-  with pytest.raises(ConfigEntryError, match="HAR file must exist"):
-    await async_setup_entry(hass, entry)
+  result = await async_setup_entry(hass, entry)
+
+  assert result is True
+  assert init_calls[0]["har_path"] is None
+  assert init_calls[0]["state_path"] == tmp_path / ".storage" / "suning_biu_0086_13800000000.json"
+  assert entry.runtime_data.client.state.phone_number == "13800000000"
+  assert entry.runtime_data.client.state.international_code == "0086"
 
 
 @pytest.mark.asyncio
@@ -159,6 +148,56 @@ async def test_coordinator_raises_config_entry_auth_failed(monkeypatch: pytest.M
 
   with pytest.raises(ConfigEntryAuthFailed, match="session expired"):
     await coordinator._async_update_data()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_user_step_form_no_longer_contains_har_field(tmp_path: Path) -> None:
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.context = {"source": config_entries.SOURCE_USER}
+
+  result = await flow.async_step_user()
+
+  schema = result["data_schema"].schema
+  field_names = {field.schema for field in schema}
+  assert field_names == {CONF_PHONE_NUMBER, CONF_INTERNATIONAL_CODE}
+
+
+@pytest.mark.asyncio
+async def test_family_step_creates_entry_without_har_path(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class SuningError(Exception):
+    pass
+
+  class FakeClient:
+    def list_air_conditioner_statuses(self, family_id: str) -> list[object]:
+      assert family_id == "37790"
+      return [object()]
+
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.context = {"source": config_entries.SOURCE_USER}
+  flow._client = FakeClient()
+  flow._phone_number = "13800000000"
+  flow._international_code = "0086"
+  flow._families = [SimpleNamespace(family_id="37790", name="我的家")]
+
+  monkeypatch.setattr(
+    "custom_components.suning_biu.config_flow.load_client_lib",
+    lambda: SimpleNamespace(SuningError=SuningError),
+  )
+
+  result = await flow.async_step_family({CONF_FAMILY_ID: "37790"})
+
+  assert result["type"] == "create_entry"
+  assert result["data"] == {
+    CONF_PHONE_NUMBER: "13800000000",
+    CONF_INTERNATIONAL_CODE: "0086",
+    CONF_FAMILY_ID: "37790",
+    CONF_FAMILY_NAME: "我的家",
+  }
 
 
 @pytest.mark.asyncio
@@ -198,7 +237,6 @@ async def test_reauth_sms_code_step_updates_existing_entry(
     data={
       CONF_PHONE_NUMBER: "13800000000",
       CONF_INTERNATIONAL_CODE: "0086",
-      CONF_HAR_PATH: "captures/devices.har",
       CONF_FAMILY_ID: "37790",
     }
   )
@@ -219,45 +257,6 @@ async def test_reauth_sms_code_step_updates_existing_entry(
   assert result == {"type": "abort", "reason": "reauth_successful", "entry_id": "entry-1"}
   assert fake_client.login_calls == [("13800000000", "123456", "0086")]
   assert fake_client.keep_alive_called is True
-
-
-@pytest.mark.asyncio
-async def test_reconfigure_step_updates_har_path(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path: Path,
-) -> None:
-  captures_dir = tmp_path / "captures"
-  captures_dir.mkdir()
-  har_path = captures_dir / "devices.har"
-  har_path.write_text("{}", encoding="utf-8")
-
-  flow = SuningConfigFlow()
-  flow.hass = HomeAssistant(str(tmp_path))
-  flow.context = {"source": config_entries.SOURCE_RECONFIGURE}
-  reconfigure_entry = FakeConfigEntry(
-    data={
-      CONF_PHONE_NUMBER: "13800000000",
-      CONF_INTERNATIONAL_CODE: "0086",
-      CONF_HAR_PATH: "captures/old.har",
-      CONF_FAMILY_ID: "37790",
-      CONF_FAMILY_NAME: "我的家",
-    }
-  )
-
-  monkeypatch.setattr(flow, "_get_reconfigure_entry", lambda: reconfigure_entry)
-  monkeypatch.setattr(
-    flow,
-    "async_update_reload_and_abort",
-    lambda entry, **kwargs: {"type": "abort", "data_updates": kwargs["data_updates"], "entry_id": entry.entry_id},
-  )
-
-  result = await flow.async_step_reconfigure({CONF_HAR_PATH: "captures/devices.har"})
-
-  assert result == {
-    "type": "abort",
-    "data_updates": {CONF_HAR_PATH: "captures/devices.har"},
-    "entry_id": "entry-1",
-  }
 
 
 def test_climate_entity_exposes_expected_state() -> None:
@@ -316,11 +315,12 @@ async def test_climate_async_setup_entry_adds_one_entity_per_device_id(tmp_path:
   assert [entity._device_id for entity in captured_entities] == ["ac-1", "ac-2"]  # noqa: SLF001
 
 
-def test_strings_json_includes_reauth_and_reconfigure_steps() -> None:
+def test_strings_json_removes_har_text_and_keeps_reauth() -> None:
   strings_path = Path("custom_components/suning_biu/strings.json")
   payload = json.loads(strings_path.read_text(encoding="utf-8"))
 
+  assert "har_path" not in payload["config"]["step"]["user"]["data"]
+  assert "reconfigure" not in payload["config"]["step"]
+  assert "har_not_found" not in payload["config"]["error"]
   assert "reauth_confirm" in payload["config"]["step"]
-  assert "reconfigure" in payload["config"]["step"]
   assert "reauth_successful" in payload["config"]["abort"]
-  assert "reconfigure_successful" in payload["config"]["abort"]

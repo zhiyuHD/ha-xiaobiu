@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
+import hmac
 import json
 import re
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import requests
 from requests.cookies import create_cookie
@@ -35,6 +38,10 @@ DEFAULT_USER_AGENT = (
   "AppleWebKit/537.36 (KHTML, like Gecko) "
   "Chrome/134.0.0.0 Safari/537.36"
 )
+DEFAULT_APP_USER_AGENT = "SmartHome/6.4.7 (Android; Android 14; Scale/3.00)"
+DEFAULT_APP_TERMINAL_TYPE = "SHCSS_ANDROID"
+DEFAULT_APP_ACCEPT_LANGUAGE = "zh-Hans-US;q=1, zh-Hant-US;q=0.9, en-US;q=0.8, ja-US;q=0.7"
+APP_API_GS_SIGN_SECRET = "ad71cef5-c46a-48f7-a810-61f4be3a207a"
 MEMBER_BASE_INFO_URL = "https://shcss.suning.com/shcss-web/api/member/queryMemberBaseInfo.do"
 FAMILY_LIST_URL = "https://itapig.suning.com/api/trade/shcss/queryAllFamily"
 DEVICE_LIST_URL = "https://itapig.suning.com/api/trade/shcss/all"
@@ -141,6 +148,21 @@ def _canonicalize_request_body(raw_body: str | None, content_type: str | None = 
     except json.JSONDecodeError:
       return body
   return body
+
+
+def _build_gs_sign_payload(url_path: str, request_time: int | str, body: str | None) -> str:
+  canonical_body = _canonicalize_request_body(body, "application/json")
+  payload = f"url={url_path}&requestTime={request_time}&data={canonical_body}"
+  return payload.replace(" ", "").replace("\n", "").replace("\r", "")
+
+
+def _build_gs_sign(url_path: str, request_time: int | str, body: str | None) -> str:
+  payload = _build_gs_sign_payload(url_path, request_time, body)
+  return hmac.new(
+    APP_API_GS_SIGN_SECRET.encode("utf-8"),
+    payload.encode("utf-8"),
+    hashlib.sha256,
+  ).hexdigest()
 
 
 def _decode_har_content(content: dict[str, Any]) -> str:
@@ -270,10 +292,14 @@ class SuningSmartHomeClient:
     dfp_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
+    app_user_agent: str = DEFAULT_APP_USER_AGENT,
+    app_terminal_type: str = DEFAULT_APP_TERMINAL_TYPE,
   ) -> None:
     self.timeout = timeout
     self.state_path = Path(state_path) if state_path else None
     self.har_path = Path(har_path) if har_path else None
+    self.app_user_agent = app_user_agent
+    self.app_terminal_type = app_terminal_type
     self.session = requests.Session()
     self.session.headers.update(
       {
@@ -291,7 +317,8 @@ class SuningSmartHomeClient:
       self.state.dfp_token = dfp_token
     if self.state_path and self.state_path.exists():
       self.load_state()
-    self.load_signed_templates()
+    if self.har_path:
+      self.load_signed_templates()
 
   def update_risk_context(self, *, detect: str | None = None, dfp_token: str | None = None) -> None:
     if detect:
@@ -557,19 +584,63 @@ class SuningSmartHomeClient:
     self._touch_state()
     return data
 
-  def list_families(self) -> dict[str, Any]:
-    template = self._find_signed_template("POST", FAMILY_LIST_URL, "")
-    if not template:
-      raise SuningError(
-        "缺少 queryAllFamily 的已签名 HAR 模板，当前无法调用 App 端家庭列表接口。"
+  def _build_app_api_headers(self, url: str, *, body: str) -> dict[str, str]:
+    request_time = str(int(time.time() * 1000))
+    trace_id = uuid4().hex
+    return {
+      "Accept": "*/*",
+      "Accept-Language": DEFAULT_APP_ACCEPT_LANGUAGE,
+      "Content-Type": "application/json",
+      "TerminalVersion": self.app_user_agent,
+      "User-Agent": self.app_user_agent,
+      "terminalType": self.app_terminal_type,
+      "requestTime": request_time,
+      "gsSign": _build_gs_sign(urlsplit(url).path, request_time, body),
+      "snTraceId": trace_id,
+      "hiro_trace_id": trace_id,
+      "snTraceType": "SDK",
+    }
+
+  def _request_app_api(self, url: str, *, body: str = "") -> requests.Response:
+    payload = _canonicalize_request_body(body, "application/json")
+
+    def send_request() -> requests.Response:
+      return self.session.request(
+        "POST",
+        url,
+        headers=self._build_app_api_headers(url, body=payload),
+        data=payload,
+        timeout=self.timeout,
+        allow_redirects=False,
       )
-    response = self._request_with_signed_template(template, body="")
+
+    response = send_request()
+    if self._is_login_redirect(response):
+      self.bootstrap_service("itapig")
+      response = send_request()
+    if self._is_login_redirect(response):
+      raise AuthenticationError("itapig service bootstrap failed")
+    return response
+
+  def _decode_app_api_response(
+    self,
+    response: requests.Response,
+    *,
+    action: str,
+  ) -> dict[str, Any]:
     response.raise_for_status()
-    data = response.json()
+    try:
+      data = response.json()
+    except ValueError as error:
+      raise SuningError(f"{action} 返回了无法解析的 JSON 响应。") from error
     if data.get("responseCode") != "0":
-      raise AuthenticationError(data.get("responseMsg") or "list families failed")
+      raise SuningError(data.get("responseMsg") or f"{action} failed")
     self._touch_state()
     return data
+
+  def list_families(self) -> dict[str, Any]:
+    response = self._request_app_api(FAMILY_LIST_URL)
+    return self._decode_app_api_response(response, action="家庭列表请求")
 
   def list_family_infos(self) -> list[FamilyInfo]:
     payload = self.list_families()
@@ -606,24 +677,8 @@ class SuningSmartHomeClient:
       separators=(",", ":"),
       ensure_ascii=False,
     )
-    template = self._find_signed_template("POST", DEVICE_LIST_URL, request_body)
-    if not template:
-      available_family_ids = self.available_device_template_family_ids()
-      if available_family_ids:
-        raise SuningError(
-          "当前 HAR 中没有 familyId="
-          f"{family_id} 的设备列表签名模板，可用 familyId: {', '.join(available_family_ids)}"
-        )
-      raise SuningError(
-        "缺少设备列表的已签名 HAR 模板，当前无法调用 App 端设备列表接口。"
-      )
-    response = self._request_with_signed_template(template, body=request_body)
-    response.raise_for_status()
-    data = response.json()
-    if data.get("responseCode") != "0":
-      raise AuthenticationError(data.get("responseMsg") or "list devices failed")
-    self._touch_state()
-    return data
+    response = self._request_app_api(DEVICE_LIST_URL, body=request_body)
+    return self._decode_app_api_response(response, action="设备列表请求")
 
   def get_device(
     self,
@@ -850,13 +905,9 @@ class SuningSmartHomeClient:
       self._load_signed_templates_from_har(har_path)
 
   def _candidate_har_paths(self) -> list[Path]:
-    if self.har_path:
-      return [self.har_path]
-    return sorted(
-      Path.cwd().glob("*.har"),
-      key=lambda path: path.stat().st_mtime,
-      reverse=True,
-    )
+    if not self.har_path:
+      return []
+    return [self.har_path]
 
   def _load_signed_templates_from_har(self, har_path: Path) -> None:
     if not har_path.exists():

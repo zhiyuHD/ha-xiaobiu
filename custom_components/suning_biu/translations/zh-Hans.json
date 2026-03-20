@@ -3,11 +3,10 @@
     "step": {
       "user": {
         "title": "连接苏宁小 biu",
-        "description": "请输入用于苏宁短信登录的手机号，以及位于 Home Assistant 配置目录下、包含家庭/设备接口签名请求的 HAR 文件路径。",
+        "description": "请输入用于苏宁短信登录的手机号。集成现在会自动为家庭和设备请求生成签名。",
         "data": {
           "phone_number": "手机号",
-          "international_code": "国际区号",
-          "har_path": "HAR 文件路径"
+          "international_code": "国际区号"
         }
       },
       "captcha": {
@@ -28,13 +27,6 @@
         "title": "重新连接苏宁小 biu",
         "description": "{phone_number} 对应的苏宁会话已失效。提交此步骤后会重新发送短信验证码，并继续完成重新认证。"
       },
-      "reconfigure": {
-        "title": "更新 HAR 文件路径",
-        "description": "请更新账号 {phone_number} 下家庭 {family_name} 使用的 HAR 文件路径。该文件必须位于 Home Assistant 配置目录内。",
-        "data": {
-          "har_path": "HAR 文件路径"
-        }
-      },
       "family": {
         "title": "选择家庭",
         "description": "请选择需要导入到 Home Assistant 的苏宁家庭。",
@@ -47,14 +39,12 @@
       "cannot_connect": "连接苏宁失败。",
       "dependency_not_ready": "苏宁运行时依赖加载失败。请查看 Home Assistant 日志中的依赖安装错误。",
       "invalid_auth": "短信验证码无效或已过期。",
-      "har_not_found": "HAR 文件必须位于 Home Assistant 配置目录下，且扩展名必须为 .har。",
       "captcha_not_ready": "验证码尚未完成。",
       "no_supported_devices": "所选家庭下未发现支持的空调设备。"
     },
     "abort": {
       "already_configured": "该苏宁账号已经配置。",
-      "reauth_successful": "苏宁账号已重新认证成功。",
-      "reconfigure_successful": "苏宁集成配置已更新成功。"
+      "reauth_successful": "苏宁账号已重新认证成功。"
     }
   },
   "entity": {

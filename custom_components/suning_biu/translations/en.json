@@ -3,11 +3,10 @@
     "step": {
       "user": {
         "title": "Connect Suning Biu",
-        "description": "Enter the mobile number used for Suning SMS login and the HAR file path under the Home Assistant config directory that contains the signed family/device requests.",
+        "description": "Enter the mobile number used for Suning SMS login. The integration now signs the family and device requests automatically.",
         "data": {
           "phone_number": "Phone number",
-          "international_code": "International code",
-          "har_path": "HAR file path"
+          "international_code": "International code"
         }
       },
       "captcha": {
@@ -28,13 +27,6 @@
         "title": "Reconnect Suning Biu",
         "description": "Suning session for {phone_number} has expired. Submit this step to send a new SMS code and complete reauthentication."
       },
-      "reconfigure": {
-        "title": "Update HAR file path",
-        "description": "Update the HAR file path used by the configured family {family_name} on account {phone_number}. The file must stay inside the Home Assistant config directory.",
-        "data": {
-          "har_path": "HAR file path"
-        }
-      },
       "family": {
         "title": "Select family",
         "description": "Choose the Suning family whose devices should be imported into Home Assistant.",
@@ -47,14 +39,12 @@
       "cannot_connect": "Failed to connect to Suning.",
       "dependency_not_ready": "The required Suning runtime dependency could not be loaded. Check Home Assistant logs for the requirement installation error.",
       "invalid_auth": "The SMS code is invalid or expired.",
-      "har_not_found": "The HAR file must exist inside the Home Assistant config directory and use the .har extension.",
       "captcha_not_ready": "Captcha has not been completed yet.",
       "no_supported_devices": "No supported air conditioner devices were found in the selected family."
     },
     "abort": {
       "already_configured": "This Suning account is already configured.",
-      "reauth_successful": "Suning account was reauthenticated successfully.",
-      "reconfigure_successful": "Suning integration settings were updated successfully."
+      "reauth_successful": "Suning account was reauthenticated successfully."
     }
   },
   "entity": {

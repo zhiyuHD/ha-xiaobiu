@@ -10,12 +10,11 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 
-from . import resolve_har_path, session_state_path
+from . import session_state_path
 from .client_lib import SuningDependencyError, load_client_lib
 from .const import (
   CONF_FAMILY_ID,
   CONF_FAMILY_NAME,
-  CONF_HAR_PATH,
   CONF_INTERNATIONAL_CODE,
   CONF_PHONE_NUMBER,
   DEFAULT_INTERNATIONAL_CODE,
@@ -31,7 +30,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
   def __init__(self) -> None:
     self._phone_number: str | None = None
     self._international_code: str = DEFAULT_INTERNATIONAL_CODE
-    self._har_path: str | None = None
     self._client: object | None = None
     self._families: list[Any] = []
     self._captcha_kind: str | None = None
@@ -43,7 +41,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     if user_input is not None:
       self._phone_number = user_input[CONF_PHONE_NUMBER].strip()
       self._international_code = user_input[CONF_INTERNATIONAL_CODE].strip()
-      self._har_path = user_input[CONF_HAR_PATH].strip()
       await self.async_set_unique_id(f"{self._international_code}:{self._phone_number}")
       self._abort_if_unique_id_configured()
 
@@ -62,7 +59,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         {
           vol.Required(CONF_PHONE_NUMBER): str,
           vol.Required(CONF_INTERNATIONAL_CODE, default=self._international_code): str,
-          vol.Required(CONF_HAR_PATH): str,
         }
       ),
       errors=errors,
@@ -80,7 +76,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         reauth_entry.data[CONF_INTERNATIONAL_CODE],
       )
     )
-    self._har_path = str(entry_data.get(CONF_HAR_PATH, reauth_entry.data[CONF_HAR_PATH]))
     return await self.async_step_reauth_confirm()
 
   async def async_step_reauth_confirm(
@@ -103,38 +98,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
       step_id="reauth_confirm",
       data_schema=vol.Schema({}),
       description_placeholders={"phone_number": self._phone_number or ""},
-      errors=errors,
-    )
-
-  async def async_step_reconfigure(
-    self,
-    user_input: dict[str, Any] | None = None,
-  ) -> ConfigFlowResult:
-    errors: dict[str, str] = {}
-    reconfigure_entry = self._get_reconfigure_entry()
-
-    if user_input is not None:
-      har_path = user_input[CONF_HAR_PATH].strip()
-      try:
-        resolve_har_path(self.hass, har_path)
-      except ValueError:
-        errors["base"] = "har_not_found"
-      else:
-        return self.async_update_reload_and_abort(
-          reconfigure_entry,
-          data_updates={CONF_HAR_PATH: har_path},
-        )
-
-    return self.async_show_form(
-      step_id="reconfigure",
-      data_schema=self.add_suggested_values_to_schema(
-        vol.Schema({vol.Required(CONF_HAR_PATH): str}),
-        {CONF_HAR_PATH: reconfigure_entry.data[CONF_HAR_PATH]},
-      ),
-      description_placeholders={
-        "phone_number": str(reconfigure_entry.data[CONF_PHONE_NUMBER]),
-        "family_name": str(reconfigure_entry.data.get(CONF_FAMILY_NAME, "")),
-      },
       errors=errors,
     )
 
@@ -234,7 +197,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data={
               CONF_PHONE_NUMBER: self._phone_number,
               CONF_INTERNATIONAL_CODE: self._international_code,
-              CONF_HAR_PATH: self._har_path,
               CONF_FAMILY_ID: family.family_id,
               CONF_FAMILY_NAME: family.name,
             },
@@ -306,13 +268,8 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     except SuningDependencyError:
       return None, "dependency_not_ready"
 
-    if self._phone_number is None or self._har_path is None:
+    if self._phone_number is None:
       return client_lib, "cannot_connect"
-
-    try:
-      resolved_har_path = resolve_har_path(self.hass, self._har_path)
-    except ValueError:
-      return client_lib, "har_not_found"
 
     self._client = client_lib.SuningSmartHomeClient(
       state_path=session_state_path(
@@ -320,7 +277,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._international_code,
         self._phone_number,
       ),
-      har_path=resolved_har_path,
     )
     return client_lib, None
 
