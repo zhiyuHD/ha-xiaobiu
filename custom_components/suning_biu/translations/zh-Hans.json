@@ -11,7 +11,7 @@
       },
       "captcha": {
         "title": "完成验证码验证",
-        "description": "苏宁在发送短信前要求额外验证。若当前为 IAR 拼图验证，请在浏览器中打开 {captcha_url} 完成拼图，然后再次提交本步骤。",
+        "description": "苏宁在发送短信前要求额外验证。对于 IAR 拼图，Home Assistant 会提供验证页面入口；请在该页面完成拼图，流程会自动继续。",
         "data": {
           "captcha_value": "验证码 token"
         }
@@ -44,6 +44,7 @@
     },
     "abort": {
       "already_configured": "该苏宁账号已经配置。",
+      "captcha_session_expired": "验证码会话已过期，请重新开始登录流程。",
       "reauth_successful": "苏宁账号已重新认证成功。"
     }
   },

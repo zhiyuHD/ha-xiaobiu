@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from homeassistant import config_entries
+from homeassistant.components.http import KEY_HASS
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -23,6 +24,12 @@ from custom_components.suning_biu.const import (
   CONF_INTERNATIONAL_CODE,
   CONF_PHONE_NUMBER,
   DOMAIN,
+)
+from custom_components.suning_biu.iar_external_view import (
+  IARCaptchaResult,
+  SuningIARCaptchaView,
+  async_create_iar_captcha_session,
+  async_get_iar_captcha_session,
 )
 from custom_components.suning_biu.coordinator import SuningDataUpdateCoordinator
 
@@ -48,6 +55,14 @@ class FakeConfigEntriesManager:
   async def async_unload_platforms(self, entry: Any, platforms: tuple[Any, ...]) -> bool:
     self.forwarded.append((entry, platforms))
     return True
+
+
+class FakeHTTP:
+  def __init__(self) -> None:
+    self.views: list[Any] = []
+
+  def register_view(self, view: Any) -> None:
+    self.views.append(view)
 
 
 def test_load_client_lib_wraps_runtime_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,27 +287,6 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
       super().__init__(risk_type)
       self.risk_type = risk_type
 
-  class FakeBridge:
-    def __init__(self, *, ticket: str, script_urls: list[str] | None = None) -> None:
-      self.ticket = ticket
-      self.script_urls = script_urls
-      self.url = "http://127.0.0.1:43127/"
-      self.started = False
-      self.closed = False
-
-    def start(self) -> None:
-      self.started = True
-
-    def wait_for_token(self, _timeout: float) -> Any:
-      return SimpleNamespace(
-        token="iar-token",
-        detect="browser-detect",
-        dfp_token="browser-dfp",
-      )
-
-    def close(self) -> None:
-      self.closed = True
-
   class FakeClient:
     def __init__(self) -> None:
       self.risk_context_script_urls = ["https://example.com/fp.js"]
@@ -327,7 +321,9 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
   fake_client = FakeClient()
   flow = SuningConfigFlow()
   flow.hass = HomeAssistant(str(tmp_path))
+  flow.hass.http = FakeHTTP()
   flow.context = {"source": config_entries.SOURCE_USER}
+  flow.flow_id = "flow-123"
   flow._client = fake_client
   flow._phone_number = "13800000000"
   flow._international_code = "0086"
@@ -337,7 +333,6 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
     lambda: SimpleNamespace(
       SuningError=SuningError,
       CaptchaRequiredError=CaptchaRequiredError,
-      LocalCaptchaBridge=FakeBridge,
       CaptchaSolution=lambda **kwargs: SimpleNamespace(**kwargs),
     ),
   )
@@ -347,11 +342,23 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
   monkeypatch.setattr(flow, "async_step_sms_code", fake_async_step_sms_code)
 
   captcha_result = await flow._async_send_sms()  # noqa: SLF001
+  assert captcha_result["type"] == "external"
   assert captcha_result["step_id"] == "captcha"
-  assert isinstance(flow._captcha_bridge, FakeBridge)
-  assert flow._captcha_bridge.script_urls == ["https://example.com/fp.js"]
+  assert captcha_result["url"].startswith(f"/api/{DOMAIN}/iar/flow-123/")
+  session = async_get_iar_captcha_session(flow.hass, "flow-123")
+  assert session is not None
+  assert session.script_urls == ["https://example.com/fp.js"]
+  session.result = IARCaptchaResult(
+    token="iar-token",
+    detect="browser-detect",
+    dfp_token="browser-dfp",
+  )
 
-  result = await flow.async_step_captcha({})
+  result = await flow.async_step_captcha()
+  assert result["type"] == "external_done"
+  assert result["step_id"] == "captcha_done"
+
+  result = await flow.async_step_captcha_done()
 
   assert result == {"type": "form", "step_id": "sms_code"}
   assert fake_client.risk_updates == [("browser-detect", "browser-dfp")]
@@ -359,6 +366,88 @@ async def test_iar_captcha_step_updates_risk_context_before_retry(
   assert fake_client.send_sms_calls[1][0:2] == ("browser-detect", "browser-dfp")
   assert fake_client.send_sms_calls[1][2].kind == "iar"
   assert fake_client.send_sms_calls[1][2].value == "iar-token"
+  assert async_get_iar_captcha_session(flow.hass, "flow-123") is None
+
+
+@pytest.mark.asyncio
+async def test_iar_captcha_step_aborts_when_session_is_missing(tmp_path: Path) -> None:
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.context = {"source": config_entries.SOURCE_USER}
+  flow.flow_id = "flow-123"
+  flow._captcha_kind = "iar"
+
+  result = await flow.async_step_captcha()
+
+  assert result["type"] == "abort"
+  assert result["reason"] == "captcha_session_expired"
+
+
+@pytest.mark.asyncio
+async def test_iar_captcha_view_serves_page_and_triggers_flow_resume(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  hass = HomeAssistant(str(tmp_path))
+  hass.http = FakeHTTP()
+  resumed_flows: list[str] = []
+  created_tasks: list[Any] = []
+
+  async def fake_async_configure(*, flow_id: str) -> None:
+    resumed_flows.append(flow_id)
+
+  monkeypatch.setattr(
+    hass,
+    "async_create_task",
+    lambda coro, *args, **kwargs: created_tasks.append(coro),
+  )
+  hass.config_entries = SimpleNamespace(
+    flow=SimpleNamespace(async_configure=fake_async_configure)
+  )
+
+  session = async_create_iar_captcha_session(
+    hass,
+    flow_id="flow-123",
+    ticket="ticket-123",
+    script_urls=["https://example.com/fp.js"],
+  )
+
+  class FakeRequest:
+    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+      self.app = {KEY_HASS: hass}
+      self._payload = payload or {}
+
+    async def json(self) -> dict[str, Any]:
+      return self._payload
+
+  view = SuningIARCaptchaView()
+  response = await view.get(FakeRequest(), flow_id="flow-123", nonce=session.nonce)
+  body = response.body.decode("utf-8")
+  assert response.status == 200
+  assert "ticket-123" in body
+  assert session.path in body
+  assert "https://example.com/fp.js" in body
+
+  post_response = await view.post(
+    FakeRequest(
+      {
+        "token": "iar-token",
+        "detect": "browser-detect",
+        "dfpToken": "browser-dfp",
+      }
+    ),
+    flow_id="flow-123",
+    nonce=session.nonce,
+  )
+  assert post_response.status == 200
+  assert session.result == IARCaptchaResult(
+    token="iar-token",
+    detect="browser-detect",
+    dfp_token="browser-dfp",
+  )
+  assert len(created_tasks) == 1
+  await created_tasks[0]
+  assert resumed_flows == ["flow-123"]
 
 
 def test_climate_entity_exposes_expected_state() -> None:
@@ -424,5 +513,7 @@ def test_strings_json_removes_har_text_and_keeps_reauth() -> None:
   assert "har_path" not in payload["config"]["step"]["user"]["data"]
   assert "reconfigure" not in payload["config"]["step"]
   assert "har_not_found" not in payload["config"]["error"]
+  assert "{captcha_url}" not in payload["config"]["step"]["captcha"]["description"]
   assert "reauth_confirm" in payload["config"]["step"]
+  assert "captcha_session_expired" in payload["config"]["abort"]
   assert "reauth_successful" in payload["config"]["abort"]

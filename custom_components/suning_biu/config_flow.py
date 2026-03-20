@@ -10,6 +10,12 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 
+from .iar_external_view import (
+  async_create_iar_captcha_session,
+  async_get_iar_captcha_session,
+  async_pop_iar_captcha_session,
+  async_remove_iar_captcha_session,
+)
 from . import session_state_path
 from .client_lib import SuningDependencyError, load_client_lib
 from .const import (
@@ -21,8 +27,6 @@ from .const import (
   DOMAIN,
 )
 
-CAPTCHA_POLL_TIMEOUT = 0.1
-
 
 class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
   VERSION = 1
@@ -33,7 +37,6 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     self._client: object | None = None
     self._families: list[Any] = []
     self._captcha_kind: str | None = None
-    self._captcha_bridge: object | None = None
 
   async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
     errors: dict[str, str] = {}
@@ -103,23 +106,24 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
   async def async_step_captcha(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
     errors: dict[str, str] = {}
-    description_placeholders: dict[str, str] = {}
-
-    if self._captcha_kind == "iar" and self._captcha_bridge is not None:
-      description_placeholders["captcha_url"] = self._captcha_bridge.url
 
     if user_input is not None:
       client_lib = load_client_lib()
       try:
         captcha = await self._async_resolve_captcha(user_input)
         return await self._async_send_sms(captcha)
-      except TimeoutError:
-        errors["base"] = "captcha_not_ready"
       except client_lib.SuningError:
         errors["base"] = "cannot_connect"
 
-    schema: vol.Schema
     if self._captcha_kind == "iar":
+      session = async_get_iar_captcha_session(self.hass, self.flow_id)
+      if session is None:
+        return self.async_abort(reason="captcha_session_expired")
+      if session.result is not None:
+        return self.async_external_step_done(next_step_id="captcha_done")
+      return self.async_external_step(step_id="captcha", url=session.path)
+    if self._captcha_kind is None:
+      errors["base"] = "cannot_connect"
       schema = vol.Schema({})
     else:
       schema = vol.Schema(
@@ -132,7 +136,21 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
       step_id="captcha",
       data_schema=schema,
       errors=errors,
-      description_placeholders=description_placeholders,
+    )
+
+  async def async_step_captcha_done(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    client_lib = load_client_lib()
+    if self._client is None or self._phone_number is None:
+      return self.async_abort(reason="captcha_session_expired")
+    session = async_pop_iar_captcha_session(self.hass, self.flow_id)
+    if session is None or session.result is None:
+      return self.async_abort(reason="captcha_session_expired")
+    self._client.update_risk_context(
+      detect=session.result.detect,
+      dfp_token=session.result.dfp_token,
+    )
+    return await self._async_send_sms(
+      client_lib.CaptchaSolution(kind="iar", value=session.result.token)
     )
 
   async def async_step_sms_code(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -231,16 +249,17 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         "isImgVerifyCode": "image",
       }.get(error.risk_type)
       if self._captcha_kind == "iar":
-        self._close_captcha_bridge()
+        self._clear_iar_captcha_session()
         ticket = await self.hass.async_add_executor_job(
           self._client.request_iar_verify_code_ticket,
           self._phone_number,
         )
-        self._captcha_bridge = client_lib.LocalCaptchaBridge(
+        async_create_iar_captcha_session(
+          self.hass,
+          flow_id=self.flow_id,
           ticket=ticket,
           script_urls=getattr(self._client, "risk_context_script_urls", None) or None,
         )
-        self._captcha_bridge.start()
       elif self._captcha_kind is None:
         raise client_lib.SuningError(f"unsupported captcha risk type: {error.risk_type}") from error
       return await self.async_step_captcha()
@@ -249,20 +268,7 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
   async def _async_resolve_captcha(self, user_input: dict[str, Any]) -> Any:
     client_lib = load_client_lib()
     if self._captcha_kind == "iar":
-      if self._captcha_bridge is None:
-        raise client_lib.SuningError("IAR captcha bridge is not initialized")
-      try:
-        result = await self.hass.async_add_executor_job(
-          self._captcha_bridge.wait_for_token,
-          CAPTCHA_POLL_TIMEOUT,
-        )
-      finally:
-        self._close_captcha_bridge()
-      self._client.update_risk_context(
-        detect=result.detect,
-        dfp_token=result.dfp_token,
-      )
-      return client_lib.CaptchaSolution(kind="iar", value=result.token)
+      raise client_lib.SuningError("IAR captcha must be completed in the external step")
 
     return client_lib.CaptchaSolution(
       kind=self._captcha_kind or "image",
@@ -305,8 +311,5 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
   def _entry_title(self, family_name: str) -> str:
     return f"{self._phone_number} - {family_name}"
 
-  def _close_captcha_bridge(self) -> None:
-    if self._captcha_bridge is None:
-      return
-    self._captcha_bridge.close()
-    self._captcha_bridge = None
+  def _clear_iar_captcha_session(self) -> None:
+    async_remove_iar_captcha_session(self.hass, self.flow_id)

@@ -1,5 +1,51 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA Native IAR External Step
+
+### Plan
+
+- [x] 对照 HA 官方 `external step` 模式，替换当前 config flow 中暴露 `127.0.0.1` 的临时桥接 URL
+- [x] 在集成内新增 HA 原生验证码页面与回调视图，允许远端浏览器直接通过 HA 地址完成 IAR
+- [x] 让 config flow 在验证码页面完成后自动恢复流程，并继续发送短信
+- [x] 补充 Home Assistant 配置流与视图测试，验证远端路径不再依赖 loopback
+- [x] 更新 README / tasks 文档，记录新的 HA 测试方式与剩余风险
+
+### Notes
+
+- 原来的 HA IAR 路径直接复用了 CLI `LocalCaptchaBridge.url`，该地址固定绑定 `127.0.0.1`，远端浏览器打开后实际上访问的是“自己设备的 localhost”
+- HA 核心 `ConfigFlow.async_external_step(...)` / `async_external_step_done(...)` 支持把配置流挂起到外部页面，再由集成或后台任务恢复流程，适合替代本地桥接端口
+
+### Review
+
+- 已新增 `custom_components/suning_biu/iar_external_view.py`
+  - 提供 `/api/suning_biu/iar/{flow_id}/{nonce}` 一次性验证页
+  - GET 返回 IAR 拼图页
+  - POST 接收 `token` / `detect` / `dfpToken`，随后恢复当前 config flow
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - IAR 分支改为 HA 原生 `external step`
+  - 验证完成后进入 `captcha_done`，先覆盖风险上下文，再重试 `sendCode.do`
+  - IAR 会话缺失时改为 `captcha_session_expired`，不再回退为空表单
+- 已更新 `src/suning_biu_ha/captcha_bridge.py` 与 vendored 副本
+  - 抽出 `render_captcha_page(...)`
+  - 支持自定义回调地址，供 CLI 本地桥接和 HA 内置视图复用同一套前端页
+- 已更新文档与版本
+  - `README.md` 改成 HA external step 新路径说明
+  - `custom_components/suning_biu/manifest.json` 版本提升到 `0.1.5`
+- 已更新测试
+  - `tests/test_home_assistant_component.py` 覆盖 external step、回调视图、会话过期 abort
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- IAR 验证页仍依赖苏宁当前公开的 `SnCaptcha.js`、`mmds` 与 `fp` 风控脚本；如果苏宁替换这套前端接口，需要重新适配
+- `requires_auth = False` 的 HA 视图使用 `flow_id + nonce` 作为一次性能力 URL；如果未来要进一步收紧安全模型，需要改成带签名的回调或走 HA 官方 OAuth/redirect callback 方案
+- 非 IAR 验证码仍然是手工 token 输入路径，本轮没有把其它验证码类型也改造成 HA 原生页面
+
 ## SMS IAR Loop Fix
 
 ### Plan

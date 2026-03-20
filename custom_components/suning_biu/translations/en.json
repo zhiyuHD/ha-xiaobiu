@@ -11,7 +11,7 @@
       },
       "captcha": {
         "title": "Complete captcha",
-        "description": "Suning requires additional verification before sending the SMS code. For IAR verification, open {captcha_url} in a browser, complete the puzzle, then submit this step again.",
+        "description": "Suning requires additional verification before sending the SMS code. For IAR, Home Assistant will show a verification page link. Complete the puzzle there and this flow will continue automatically.",
         "data": {
           "captcha_value": "Captcha token"
         }
@@ -44,6 +44,7 @@
     },
     "abort": {
       "already_configured": "This Suning account is already configured.",
+      "captcha_session_expired": "The captcha session expired. Restart the login flow and try again.",
       "reauth_successful": "Suning account was reauthenticated successfully."
     }
   },

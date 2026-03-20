@@ -23,6 +23,7 @@ HTML_TEMPLATE = """<!doctype html>
   <script src="https://iar-web.suning.com/iar-web/snstatic/SnCaptcha.js"></script>
   <script>
     window.__RISK_CONTEXT_SCRIPT_URLS__ = {script_urls_json};
+    window.__CAPTCHA_CALLBACK_URL__ = {callback_url_json};
   </script>
   <style>
     * {{
@@ -111,6 +112,7 @@ HTML_TEMPLATE = """<!doctype html>
     const statusEl = document.getElementById("status");
     const cardEl = document.querySelector(".card");
     const riskContextScripts = window.__RISK_CONTEXT_SCRIPT_URLS__ || [];
+    const callbackUrl = window.__CAPTCHA_CALLBACK_URL__ || "/callback";
     async function loadScript(src) {{
       await new Promise((resolve, reject) => {{
         const script = document.createElement("script");
@@ -179,7 +181,7 @@ HTML_TEMPLATE = """<!doctype html>
         try {{
           setStatus("验证成功，正在回传结果...", "");
           const riskContext = await riskContextPromise;
-          const response = await fetch("/callback", {{
+          const response = await fetch(callbackUrl, {{
             method: "POST",
             headers: {{
               "Content-Type": "application/json"
@@ -209,6 +211,24 @@ HTML_TEMPLATE = """<!doctype html>
 </body>
 </html>
 """
+
+
+def render_captcha_page(
+  *,
+  ticket: str,
+  env: str = "prd",
+  script_urls: list[str] | None = None,
+  callback_url: str = "/callback",
+) -> str:
+  return HTML_TEMPLATE.format(
+    env=env,
+    ticket=ticket,
+    script_urls_json=json.dumps(
+      script_urls or DEFAULT_RISK_CONTEXT_SCRIPT_URLS,
+      ensure_ascii=False,
+    ),
+    callback_url_json=json.dumps(callback_url, ensure_ascii=False),
+  )
 
 class _ThreadedHTTPServer(ThreadingHTTPServer):
   daemon_threads = True
@@ -265,10 +285,11 @@ class LocalCaptchaBridge:
         if self.path != "/":
           self.send_error(HTTPStatus.NOT_FOUND)
           return
-        html = HTML_TEMPLATE.format(
+        html = render_captcha_page(
           env=bridge.env,
           ticket=bridge.ticket,
-          script_urls_json=json.dumps(bridge.script_urls, ensure_ascii=False),
+          script_urls=bridge.script_urls,
+          callback_url="/callback",
         )
         body = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)

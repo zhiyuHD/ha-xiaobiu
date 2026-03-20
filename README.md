@@ -7,7 +7,7 @@ Python client and Home Assistant custom integration for Suning SMS login and sma
 - Normal CLI usage and the Home Assistant integration no longer require a HAR file.
 - Family and device APIs are signed at runtime using the Android `gsSign` algorithm.
 - SMS login supports Suning's current mobile login parameters (`PASSPORT_XIAOBIU` / `MOBILE`).
-- When Suning requires IAR verification, the local bridge page now also collects the browser-generated `detect` and `dfpToken` values before retrying `sendCode.do`.
+- When Suning requires IAR verification, the CLI local bridge page and the Home Assistant external-step page both collect the browser-generated `detect` and `dfpToken` values before retrying `sendCode.do`.
 - The same runtime is vendored into the Home Assistant integration under `custom_components/suning_biu/suning_biu_ha`.
 
 ## Codebase layout
@@ -27,7 +27,7 @@ This repository includes a Home Assistant custom integration at `custom_componen
 
 - Home Assistant version target: `2026.3.2`
 - Project Python target: `3.14`
-- Custom integration version: `0.1.4`
+- Custom integration version: `0.1.5`
 - The integration vendors its own runtime and does not depend on a private GitHub package URL in `manifest.json`
 - Setup path: **Settings → Devices & Services → Add Integration → Suning Biu**
 - Config flow inputs:
@@ -35,8 +35,9 @@ This repository includes a Home Assistant custom integration at `custom_componen
   - international code
 - Login flow:
   - the integration sends the SMS code through Suning's current login flow
-  - if Suning requires IAR verification, the config flow shows a local bridge URL for the puzzle page
-  - the bridge page computes the current browser risk context and returns it together with the IAR token
+  - if Suning requires IAR verification, the config flow uses a Home Assistant hosted external step instead of a `127.0.0.1` bridge URL
+  - the verification page computes the current browser risk context and posts it back together with the IAR token
+  - after the verification page submits successfully, Home Assistant resumes the flow automatically
   - after SMS login succeeds, the config flow lets you choose a family
   - the integration signs the smart-home app family/device requests at runtime and no longer asks for a HAR file
 - Entity model:
@@ -58,7 +59,7 @@ This repository includes a Home Assistant custom integration at `custom_componen
 
 ## Important limits
 
-- When Suning returns `isIarVerifyCode`, the CLI and the Home Assistant flow both rely on a local bridge page. That bridge must be opened from the machine where the process is running.
+- When Suning returns `isIarVerifyCode`, the CLI still relies on a local bridge page. The Home Assistant integration now serves its own verification page from the HA host, but non-IAR captcha types still need manual handling.
 - Other captcha types are not yet fully bridged. If Suning returns a non-IAR captcha, a token still needs to be provided manually.
 - `--detect` and `--dfp-token` are still accepted as debugging overrides, but the IAR path no longer needs them in the normal flow.
 - `--har-file` is still accepted only as a debug fallback for protocol research; the Home Assistant integration and normal CLI family/device queries no longer depend on HAR input.
@@ -130,7 +131,7 @@ env UV_CACHE_DIR=/tmp/uv-cache uv run main.py device-status \
 2. Restart Home Assistant on Python `3.14` / Home Assistant `2026.3.2`.
 3. Add the `Suning Biu` integration from **Settings → Devices & Services**.
 4. Enter the phone number and international code.
-5. If the flow shows an IAR URL, open it on the Home Assistant host, finish the puzzle, then return to the config flow.
+5. If the flow enters the IAR step, open the Home Assistant provided verification page in the same browser, finish the puzzle, and wait for the flow to resume automatically.
 6. Enter the SMS code, select the family, and confirm that `climate` entities are created.
 7. If the login succeeds but devices do not appear, verify the selected family actually contains supported air conditioners.
 
