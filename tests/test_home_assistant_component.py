@@ -179,6 +179,87 @@ async def test_user_step_form_no_longer_contains_har_field(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_user_step_restarts_same_phone_flow_and_clears_old_iar_session(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.hass.http = FakeHTTP()
+  flow.context = {"source": config_entries.SOURCE_USER}
+  flow.flow_id = "flow-new"
+  aborted_flow_ids: list[str] = []
+  unique_id = "0086:13800000000"
+  old_progress = [
+    {
+      "flow_id": "flow-old",
+      "context": {
+        "source": config_entries.SOURCE_USER,
+        "unique_id": unique_id,
+      },
+    }
+  ]
+
+  def fake_async_progress_by_handler(
+    handler: str,
+    include_uninitialized: bool = False,
+    match_context: dict[str, Any] | None = None,
+  ) -> list[dict[str, Any]]:
+    assert handler == DOMAIN
+    if include_uninitialized and match_context == {
+      "source": config_entries.SOURCE_USER,
+      "unique_id": unique_id,
+    }:
+      return old_progress
+    return []
+
+  async_create_iar_captcha_session(
+    flow.hass,
+    flow_id="flow-old",
+    ticket="ticket-123",
+  )
+
+  flow.hass.config_entries = SimpleNamespace(
+    flow=SimpleNamespace(
+      async_progress_by_handler=fake_async_progress_by_handler,
+      async_abort=lambda flow_id: aborted_flow_ids.append(flow_id),
+    )
+  )
+
+  async def fake_async_set_unique_id(unique_id: str, raise_on_progress: bool = True) -> None:
+    flow.context["unique_id"] = unique_id
+
+  monkeypatch.setattr(flow, "async_set_unique_id", fake_async_set_unique_id)
+  monkeypatch.setattr(
+    flow,
+    "_abort_if_unique_id_configured",
+    lambda: None,
+  )
+  monkeypatch.setattr(
+    flow,
+    "_initialize_client",
+    lambda: (SimpleNamespace(), None),
+  )
+
+  async def fake_async_send_sms(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    return {"type": "form", "step_id": "sms_code"}
+
+  monkeypatch.setattr(flow, "_async_send_sms", fake_async_send_sms)
+
+  result = await flow.async_step_user(
+    {
+      CONF_PHONE_NUMBER: "13800000000",
+      CONF_INTERNATIONAL_CODE: "0086",
+    }
+  )
+
+  assert result == {"type": "form", "step_id": "sms_code"}
+  assert flow.context["unique_id"] == unique_id
+  assert aborted_flow_ids == ["flow-old"]
+  assert async_get_iar_captcha_session(flow.hass, "flow-old") is None
+
+
+@pytest.mark.asyncio
 async def test_family_step_creates_entry_without_har_path(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path: Path,

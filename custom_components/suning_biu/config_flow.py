@@ -44,8 +44,10 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     if user_input is not None:
       self._phone_number = user_input[CONF_PHONE_NUMBER].strip()
       self._international_code = user_input[CONF_INTERNATIONAL_CODE].strip()
-      await self.async_set_unique_id(f"{self._international_code}:{self._phone_number}")
+      unique_id = f"{self._international_code}:{self._phone_number}"
+      await self.async_set_unique_id(unique_id, raise_on_progress=False)
       self._abort_if_unique_id_configured()
+      self._abort_existing_user_flows(unique_id)
 
       client_lib, error_key = self._initialize_client()
       if error_key is None and client_lib is not None:
@@ -310,6 +312,22 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
   def _entry_title(self, family_name: str) -> str:
     return f"{self._phone_number} - {family_name}"
+
+  def _abort_existing_user_flows(self, unique_id: str) -> None:
+    current_flow_id = getattr(self, "flow_id", None)
+    for progress in self.hass.config_entries.flow.async_progress_by_handler(
+      DOMAIN,
+      include_uninitialized=True,
+      match_context={
+        "source": config_entries.SOURCE_USER,
+        "unique_id": unique_id,
+      },
+    ):
+      flow_id = progress.get("flow_id")
+      if flow_id is None or flow_id == current_flow_id:
+        continue
+      async_remove_iar_captcha_session(self.hass, flow_id)
+      self.hass.config_entries.flow.async_abort(flow_id)
 
   def _clear_iar_captcha_session(self) -> None:
     async_remove_iar_captcha_session(self.hass, self.flow_id)

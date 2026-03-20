@@ -11,3 +11,4 @@
 - 当网页登录页已经能在真实浏览器中生成 `detect` / `dfpToken` 时，CLI 不能继续沿用 `passport_*_js_is_error` 这类占位值；验证码桥接页要把浏览器算出来的风控上下文一并回传，再用于后续风控请求
 - 运行时登录修复如果同时服务 CLI 和 Home Assistant，不能只修 `src/` 或 CLI 入口；必须同步检查 HA `config_flow` / adapter 是否也保留并传递了同一份状态与上下文
 - Home Assistant 配置流里给远端浏览器用的验证码步骤，不能复用 CLI 的 `127.0.0.1` 本地桥接；应优先使用 HA 自己的 `external step` 和集成内路由，让页面始终挂在当前 HA 主机地址下
+- Home Assistant `external step` 页面被用户直接关掉时，HA 不会自动结束原 config flow；如果后续允许用户“重新开始”，必须在新的 user flow 入口主动接管并 abort 同 `unique_id` 的旧 flow，否则会长期卡在 `already_in_progress`

@@ -1,5 +1,41 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA IAR Flow Restart Unblock
+
+### Plan
+
+- [x] 复核 HA `already_in_progress` 触发链路，确认旧 user flow 在 IAR external step 关闭后未被释放的根因
+- [x] 调整 `config_flow` 的 user 入口，允许新的手工登录尝试接管并终止同手机号的旧 flow
+- [x] 同步清理旧 IAR captcha session，避免 flow abort 后残留孤儿 session
+- [x] 补充针对“关闭 IAR 页面后重新添加集成”的回归测试并运行验证
+- [x] 回填 tasks 文档与 lessons，记录这类 HA external step 中断的处理规则
+
+### Notes
+
+- 关闭 IAR 外部页面或刷新 HA 前端，并不会自动告诉 HA “当前 config flow 已取消”
+- HA 的 `async_set_unique_id(...)` 会直接根据仍在 progress 列表里的旧 flow 抛出 `already_in_progress`
+- 这意味着只要旧 user flow 没被显式 abort，重新输入同一个手机号时就会一直被挡住
+
+### Review
+
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - `async_step_user(...)` 改为先 `async_set_unique_id(..., raise_on_progress=False)`
+  - 随后主动扫描同 `unique_id` 的其它 `SOURCE_USER` flow，并执行接管
+  - 接管时会同时 `async_abort(old_flow_id)` 并清掉旧 IAR session
+- 已更新 `tests/test_home_assistant_component.py`
+  - 新增“旧 IAR flow 关掉后，重新添加同手机号会接管旧 flow”的回归测试
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- 浏览器直接关闭这一动作仍然没有服务器回调，因此“旧 flow 被动超时取消”这件事当前仍未自动化；本轮修的是“下一次手工重试时能正确接管旧 flow”
+- 如果用户真的在两个前端会话里同时对同一手机号发起手工登录，后发起的 flow 会接管并终止前一个 flow；这是有意选择，用来匹配“重新开始登录”的用户预期
+
 ## HA Native IAR External Step
 
 ### Plan
