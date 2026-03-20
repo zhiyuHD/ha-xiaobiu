@@ -11,6 +11,7 @@ Python client for Suning SMS login and smart home session reuse.
 - Re-bootstrap `shcss` and `itapig` service sessions after login.
 - Verify the session by calling member info, family list, and device list endpoints.
 - Reuse signed app-request templates extracted from HAR files for the current `families` / `devices` MVP.
+- Normalize AC device payloads into a more stable status model and provide a Home Assistant climate preview.
 
 ## Important limits
 
@@ -76,6 +77,16 @@ env UV_CACHE_DIR=/tmp/uv-cache uv run main.py devices \
   --family-id 37790 \
   --state-file .suning-session.json \
   --har-file apm.suning.cn_2026_03_19_23_47_23.har
+
+env UV_CACHE_DIR=/tmp/uv-cache uv run main.py device-status \
+  --family-id 37790 \
+  --device-id 000165f9b029afa2e5d8 \
+  --state-file .suning-session.json \
+  --har-file apm.suning.cn_2026_03_19_23_47_23.har
+
+env UV_CACHE_DIR=/tmp/uv-cache uv run main.py device-status \
+  --family-id 37790 \
+  --raw
 ```
 
 ## Library usage

@@ -2,23 +2,30 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
 import re
 import time
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 import requests
 from requests.cookies import create_cookie
 
 from .captcha_bridge import LocalCaptchaBridge
 from .crypto import SuAESCipher, rsa_encrypt_base64
+from .models import (
+  AirConditionerStatus,
+  AuthState,
+  CaptchaSolution,
+  HAClimatePreview,
+  LoginPageConfig,
+  PersistedSessionState,
+  SerializedCookie,
+  SignedRequestTemplate,
+)
 
-DEFAULT_DETECT = "passport_detect_js_is_error"
-DEFAULT_DFP_TOKEN = "passport_dfpToken_js_is_error"
 DEFAULT_LOGIN_URL = "https://passport.suning.com/ids/login"
 DEFAULT_TARGET_URL = "https://www.suning.com/"
 DEFAULT_TIMEOUT = 20.0
@@ -37,21 +44,6 @@ SERVICE_BOOTSTRAP_URLS = {
   "itapig": "http://itapig.suning.com/api/trade/shcss/queryAllFamily",
   "opensh": OPENSH_GET_KEY_URL,
 }
-
-
-@dataclass(slots=True)
-class LoginPageConfig:
-  login_pbk: str
-  rdsy_key: str
-  rdsy_app_code: str
-  step_flag: str
-  step_two_flag: str
-  step_three_flag: str
-  rdsy_scene_id: str
-  rdsy_scene_id_yghk: str
-  channel: str
-  check_account_key: str
-
 
 DEFAULT_LOGIN_PAGE_CONFIG = LoginPageConfig(
   login_pbk=(
@@ -80,47 +72,6 @@ DEFAULT_LOGIN_PAGE_CONFIG = LoginPageConfig(
     "INSDIwIDAQAB"
   ),
 )
-
-
-@dataclass(slots=True)
-class AuthState:
-  phone_number: str | None = None
-  international_code: str = "0086"
-  detect: str = DEFAULT_DETECT
-  dfp_token: str = DEFAULT_DFP_TOKEN
-  risk_type: str | None = None
-  sms_ticket: str | None = None
-  login_ticket: str | None = None
-  login_response: dict[str, Any] | None = None
-  updated_at: float | None = None
-
-
-@dataclass(slots=True)
-class CaptchaSolution:
-  kind: str
-  value: str
-
-
-@dataclass(slots=True)
-class SignedRequestTemplate:
-  method: str
-  url: str
-  headers: dict[str, str]
-  body: str = ""
-  har_path: str | None = None
-
-  def build_headers(self) -> dict[str, str]:
-    trace_id = uuid4().hex
-    headers: dict[str, str] = {}
-    for name, value in self.headers.items():
-      lower_name = name.lower()
-      if lower_name in {"host", "cookie", "content-length"} or lower_name.startswith(":"):
-        continue
-      if lower_name in {"sntraceid", "hiro_trace_id"}:
-        headers[name] = trace_id
-        continue
-      headers[name] = value
-    return headers
 
 
 class SuningError(RuntimeError):
@@ -228,27 +179,81 @@ def _template_key(method: str, url: str, body: str) -> tuple[str, str, str]:
   return (method.upper(), _normalize_url(url), body)
 
 
-def _serialize_cookie(cookie: Any) -> dict[str, Any]:
-  return {
-    "name": cookie.name,
-    "value": cookie.value,
-    "domain": cookie.domain,
-    "path": cookie.path,
-    "secure": cookie.secure,
-    "expires": cookie.expires,
-    "rest": getattr(cookie, "_rest", {}),
-  }
+def _coalesce(*values: Any) -> Any:
+  for value in values:
+    if value is None:
+      continue
+    if isinstance(value, str) and not value.strip():
+      continue
+    return value
+  return None
 
 
-def _restore_cookie(serialized_cookie: dict[str, Any]) -> Any:
+def _parse_bool_flag(value: Any) -> bool | None:
+  normalized = str(value).strip().lower()
+  if not normalized:
+    return None
+  if normalized in {"1", "true", "on", "yes"}:
+    return True
+  if normalized in {"0", "false", "off", "no"}:
+    return False
+  return None
+
+
+def _parse_float_value(value: Any) -> float | None:
+  if value is None:
+    return None
+  normalized = str(value).strip()
+  if not normalized:
+    return None
+  try:
+    return float(normalized)
+  except ValueError:
+    return None
+
+
+def _strip_html_text(value: Any) -> str | None:
+  if value is None:
+    return None
+  text = html.unescape(str(value))
+  text = re.sub(r"<[^>]+>", "", text)
+  normalized = text.strip()
+  return normalized or None
+
+
+def _infer_swing_mode(horizontal: bool | None, vertical: bool | None) -> str | None:
+  if horizontal is True and vertical is True:
+    return "both"
+  if horizontal is True:
+    return "horizontal"
+  if vertical is True:
+    return "vertical"
+  if horizontal is False and vertical is False:
+    return "off"
+  return None
+
+
+def _serialize_cookie(cookie: Any) -> SerializedCookie:
+  return SerializedCookie(
+    name=cookie.name,
+    value=cookie.value,
+    domain=cookie.domain,
+    path=cookie.path,
+    secure=cookie.secure,
+    expires=cookie.expires,
+    rest=getattr(cookie, "_rest", {}) or {},
+  )
+
+
+def _restore_cookie(serialized_cookie: SerializedCookie) -> Any:
   return create_cookie(
-    name=serialized_cookie["name"],
-    value=serialized_cookie["value"],
-    domain=serialized_cookie["domain"],
-    path=serialized_cookie["path"],
-    secure=serialized_cookie.get("secure", False),
-    expires=serialized_cookie.get("expires"),
-    rest=serialized_cookie.get("rest", {}),
+    name=serialized_cookie.name,
+    value=serialized_cookie.value,
+    domain=serialized_cookie.domain,
+    path=serialized_cookie.path,
+    secure=serialized_cookie.secure,
+    expires=serialized_cookie.expires,
+    rest=serialized_cookie.rest,
   )
 
 
@@ -588,6 +593,176 @@ class SuningSmartHomeClient:
     self._touch_state()
     return data
 
+  def get_device(
+    self,
+    family_id: str | int,
+    *,
+    device_id: str | None = None,
+  ) -> dict[str, Any]:
+    payload = self.list_devices(family_id)
+    devices = payload.get("responseData", {}).get("devices") or []
+    if not devices:
+      raise SuningError(f"familyId={family_id} 下没有设备")
+
+    if device_id:
+      for device in devices:
+        if str(device.get("id")) == str(device_id):
+          return device
+      raise SuningError(f"familyId={family_id} 下未找到 deviceId={device_id} 的设备")
+
+    if len(devices) == 1:
+      return devices[0]
+
+    climate_candidates = [
+      device for device in devices
+      if str(device.get("categoryId")) == "0002" or "空调" in str(device.get("name", ""))
+    ]
+    if len(climate_candidates) == 1:
+      return climate_candidates[0]
+
+    device_hints = ", ".join(f"{item.get('id')}:{item.get('name')}" for item in devices)
+    raise SuningError(
+      f"familyId={family_id} 下有多个设备，请通过 --device-id 指定。可选设备: {device_hints}"
+    )
+
+  def get_air_conditioner_status(
+    self,
+    family_id: str | int,
+    *,
+    device_id: str | None = None,
+  ) -> AirConditionerStatus:
+    device = self.get_device(family_id, device_id=device_id)
+    return self._normalize_air_conditioner_status(device)
+
+  def _normalize_air_conditioner_status(self, device: dict[str, Any]) -> AirConditionerStatus:
+    raw_status = device.get("status") or {}
+    online_flag = _coalesce(raw_status.get("onlineStatus"), device.get("online"))
+    online = bool(_parse_bool_flag(online_flag))
+    summary = _strip_html_text(device.get("p1"))
+    power_on = _parse_bool_flag(_coalesce(raw_status.get("SN_POWER"), raw_status.get("C_POWER")))
+    current_temperature = _parse_float_value(
+      _coalesce(raw_status.get("SN_INDOORTEMP"), raw_status.get("C_INDOORTEMP"))
+    )
+    target_temperature = _parse_float_value(
+      _coalesce(raw_status.get("SN_TEMPERATURE"), raw_status.get("C_TEMPERATURE"))
+    )
+    outdoor_temperature = _parse_float_value(raw_status.get("C_OUTDOORTEMP"))
+    swing_horizontal = _parse_bool_flag(
+      _coalesce(raw_status.get("SN_AIRHORIZONTAL"), raw_status.get("C_AIRHORIZONTAL"))
+    )
+    swing_vertical = _parse_bool_flag(
+      _coalesce(raw_status.get("SN_AIRVERTICAL"), raw_status.get("C_AIRVERTICAL"))
+    )
+    eco_enabled = _parse_bool_flag(_coalesce(raw_status.get("SN_ECO"), raw_status.get("C_ECO")))
+    purify_enabled = _parse_bool_flag(raw_status.get("SN_PURIFY"))
+    fresh_air_enabled = _parse_bool_flag(raw_status.get("C_FRESHAIR"))
+    electric_heating_enabled = _parse_bool_flag(
+      _coalesce(raw_status.get("SN_ELECHEATING"), raw_status.get("C_ELECHEATING"))
+    )
+
+    status = AirConditionerStatus(
+      device_id=str(device.get("id")),
+      name=str(device.get("name") or device.get("id") or "unknown-device"),
+      model=device.get("model"),
+      family_id=str(device.get("fId")) if device.get("fId") is not None else None,
+      group_id=str(device.get("gId")) if device.get("gId") is not None else None,
+      group_name=device.get("gName"),
+      category_id=str(device.get("categoryId")) if device.get("categoryId") is not None else None,
+      available=online,
+      online=online,
+      summary=summary,
+      device_record_time=device.get("time"),
+      refresh_time=raw_status.get("refreshTime"),
+      power_on=power_on,
+      current_temperature=current_temperature,
+      target_temperature=target_temperature,
+      outdoor_temperature=outdoor_temperature,
+      mode_raw=_coalesce(raw_status.get("SN_MODE"), raw_status.get("C_MODE")),
+      fan_mode_raw=_coalesce(raw_status.get("SN_FANSPEED"), raw_status.get("C_FANSPEED")),
+      swing_horizontal=swing_horizontal,
+      swing_vertical=swing_vertical,
+      eco_enabled=eco_enabled,
+      purify_enabled=purify_enabled,
+      fresh_air_enabled=fresh_air_enabled,
+      electric_heating_enabled=electric_heating_enabled,
+      ha_climate_preview=None,
+      raw_status=raw_status,
+      raw_device=device,
+    )
+    return status.model_copy(
+      update={"ha_climate_preview": self._build_ha_climate_preview(status)}
+    )
+
+  def _build_ha_climate_preview(self, status: AirConditionerStatus) -> HAClimatePreview:
+    notes: list[str] = []
+    hvac_mode: str | None = None
+    if not status.available:
+      notes.append("设备当前离线，Home Assistant 中应标记为 unavailable。")
+    elif status.power_on is False:
+      hvac_mode = "off"
+
+    if status.power_on is True:
+      notes.append("设备当前上报为开机，但模式枚举尚未确认，暂不映射标准 HVACMode。")
+    elif status.power_on is None:
+      notes.append("未能从原始字段中稳定解析电源状态。")
+
+    if status.mode_raw is not None:
+      notes.append(f"原始模式值为 {status.mode_raw}，后续需要控制抓包后确认枚举含义。")
+
+    supported_features_preview = [
+      feature for feature in [
+        "target_temperature" if status.target_temperature is not None else None,
+        "current_temperature" if status.current_temperature is not None else None,
+        "fan_mode" if status.fan_mode_raw is not None else None,
+        "swing_mode"
+        if _infer_swing_mode(status.swing_horizontal, status.swing_vertical) is not None
+        else None,
+        "turn_on_off" if status.power_on is not None else None,
+      ]
+      if feature is not None
+    ]
+
+    return HAClimatePreview(
+      entity_domain="climate",
+      translation_key="suning_air_conditioner",
+      available=status.available,
+      hvac_mode=hvac_mode,
+      current_temperature=status.current_temperature,
+      target_temperature=status.target_temperature,
+      fan_mode=status.fan_mode_raw,
+      swing_mode=_infer_swing_mode(status.swing_horizontal, status.swing_vertical),
+      preset_mode="eco" if status.eco_enabled else None,
+      supported_features_preview=supported_features_preview,
+      raw_mapping={
+        "power": {
+          "preferred": "SN_POWER",
+          "fallback": "C_POWER",
+          "value": status.raw_status.get("SN_POWER") or status.raw_status.get("C_POWER"),
+        },
+        "mode": {
+          "preferred": "SN_MODE",
+          "fallback": "C_MODE",
+          "value": status.mode_raw,
+        },
+        "target_temperature": {
+          "preferred": "SN_TEMPERATURE",
+          "fallback": "C_TEMPERATURE",
+          "value": status.raw_status.get("SN_TEMPERATURE") or status.raw_status.get("C_TEMPERATURE"),
+        },
+        "current_temperature": {
+          "preferred": "SN_INDOORTEMP",
+          "fallback": "C_INDOORTEMP",
+          "value": status.raw_status.get("SN_INDOORTEMP") or status.raw_status.get("C_INDOORTEMP"),
+        },
+        "fan_mode": {
+          "preferred": "SN_FANSPEED",
+          "fallback": "C_FANSPEED",
+          "value": status.fan_mode_raw,
+        },
+      },
+      notes=notes,
+    )
+
   def keep_alive(self) -> dict[str, Any]:
     member_info = self.query_member_base_info()
     family_info = self.list_families()
@@ -600,22 +775,24 @@ class SuningSmartHomeClient:
     if not self.state_path:
       return
     self.state_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-      "state": asdict(self.state),
-      "cookies": [_serialize_cookie(cookie) for cookie in self.session.cookies],
-    }
+    payload = PersistedSessionState(
+      state=self.state,
+      cookies=[_serialize_cookie(cookie) for cookie in self.session.cookies],
+    )
     self.state_path.write_text(
-      json.dumps(payload, ensure_ascii=False, indent=2),
+      json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2),
       encoding="utf-8",
     )
 
   def load_state(self) -> None:
     if not self.state_path or not self.state_path.exists():
       return
-    payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-    self.state = AuthState(**payload.get("state", {}))
+    payload = PersistedSessionState.model_validate_json(
+      self.state_path.read_text(encoding="utf-8")
+    )
+    self.state = payload.state
     self.session.cookies.clear()
-    for serialized_cookie in payload.get("cookies", []):
+    for serialized_cookie in payload.cookies:
       self.session.cookies.set_cookie(_restore_cookie(serialized_cookie))
 
   def load_signed_templates(self) -> None:
@@ -816,6 +993,12 @@ def _build_parser() -> argparse.ArgumentParser:
   add_shared_arguments(devices)
   devices.add_argument("--family-id", required=True)
 
+  device_status = subparsers.add_parser("device-status")
+  add_shared_arguments(device_status)
+  device_status.add_argument("--family-id", required=True)
+  device_status.add_argument("--device-id")
+  device_status.add_argument("--raw", action="store_true")
+
   keep_alive = subparsers.add_parser("keep-alive")
   add_shared_arguments(keep_alive)
   return parser
@@ -834,13 +1017,25 @@ def _print_payload(payload: Any) -> None:
   print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _air_conditioner_status_payload(
+  status: AirConditionerStatus,
+  *,
+  include_raw: bool = False,
+) -> dict[str, Any]:
+  payload = status.model_dump(mode="json")
+  if not include_raw:
+    payload.pop("raw_status", None)
+    payload.pop("raw_device", None)
+  return payload
+
+
 def _build_captcha_from_args(args: argparse.Namespace) -> CaptchaSolution | None:
   captcha_kind = getattr(args, "captcha_kind", None)
   captcha_value = getattr(args, "captcha_value", None)
   if captcha_kind or captcha_value:
     if not captcha_kind or not captcha_value:
       raise SuningError("captcha-kind 和 captcha-value 必须一起提供")
-    return CaptchaSolution(captcha_kind, captcha_value)
+    return CaptchaSolution(kind=captcha_kind, value=captcha_value)
   return None
 
 
@@ -900,7 +1095,7 @@ def _send_sms_with_optional_prompt(
         )
       else:
         captcha_value = _prompt_nonempty("请输入验证码 token: ")
-      active_captcha = CaptchaSolution(captcha_kind, captcha_value)
+      active_captcha = CaptchaSolution(kind=captcha_kind, value=captcha_value)
 
 
 def _obtain_iar_captcha_token(
@@ -1009,6 +1204,17 @@ def main(argv: list[str] | None = None) -> int:
       return 0
     if args.command == "devices":
       _print_payload(client.list_devices(args.family_id))
+      return 0
+    if args.command == "device-status":
+      _print_payload(
+        _air_conditioner_status_payload(
+          client.get_air_conditioner_status(
+            args.family_id,
+            device_id=args.device_id,
+          ),
+          include_raw=args.raw,
+        )
+      )
       return 0
     if args.command == "keep-alive":
       _print_payload(client.keep_alive())

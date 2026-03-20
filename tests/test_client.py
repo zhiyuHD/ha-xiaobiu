@@ -8,6 +8,7 @@ from suning_biu_ha.client import (
   DEVICE_LIST_URL,
   FAMILY_LIST_URL,
   SignedRequestTemplate,
+  _air_conditioner_status_payload,
   _build_parser,
   _captcha_kind_from_risk_type,
   parse_login_page_config,
@@ -59,7 +60,7 @@ def test_state_file_roundtrip(tmp_path) -> None:
 
 def test_captcha_field_mapping() -> None:
   client = SuningSmartHomeClient()
-  fields = client._captcha_fields(CaptchaSolution("iar", "token"))  # noqa: SLF001
+  fields = client._captcha_fields(CaptchaSolution(kind="iar", value="token"))  # noqa: SLF001
   assert fields["uuid"] == "iarVerifyCode"
   assert fields["code"] == "token"
 
@@ -77,6 +78,15 @@ def test_cli_allows_shared_options_after_subcommand() -> None:
   args = parser.parse_args(["families", "--har-file", "sample.har"])
   assert args.command == "families"
   assert args.har_file == "sample.har"
+
+
+def test_cli_supports_device_status_command() -> None:
+  parser = _build_parser()
+  args = parser.parse_args(["device-status", "--family-id", "37790", "--device-id", "abc", "--raw"])
+  assert args.command == "device-status"
+  assert args.family_id == "37790"
+  assert args.device_id == "abc"
+  assert args.raw is True
 
 
 def test_risk_type_to_captcha_kind_mapping() -> None:
@@ -180,3 +190,60 @@ def test_client_loads_signed_templates_from_har(tmp_path) -> None:
   assert device_template is not None
   assert device_template.headers["gsSign"] == "device-sign"
   assert client.available_device_template_family_ids() == ["37790"]
+
+
+def test_normalize_air_conditioner_status_builds_ha_preview() -> None:
+  client = SuningSmartHomeClient()
+  raw_device = {
+    "id": "000165f9b029afa2e5d8",
+    "name": "惠而浦空调",
+    "model": "0001000200150000",
+    "online": "0",
+    "gId": "1274540",
+    "gName": "卧室",
+    "fId": "37790",
+    "time": "2024-08-18 10:47:57",
+    "p1": "<font color='#999999'>已离线</font>",
+    "categoryId": "0002",
+    "status": {
+      "refreshTime": "20251109204142",
+      "onlineStatus": "0",
+      "SN_POWER": "1",
+      "SN_INDOORTEMP": "29.3",
+      "SN_MODE": "3",
+      "C_AIRHORIZONTAL": "1",
+      "C_AIRVERTICAL": "1",
+      "SN_TEMPERATURE": "29.3",
+      "SN_FANSPEED": "0",
+      "SN_ECO": "0",
+      "SN_PURIFY": "0",
+      "C_FRESHAIR": "0",
+      "SN_ELECHEATING": "0",
+    },
+  }
+
+  status = client._normalize_air_conditioner_status(raw_device)  # noqa: SLF001
+
+  assert status.device_id == "000165f9b029afa2e5d8"
+  assert status.available is False
+  assert status.online is False
+  assert status.summary == "已离线"
+  assert status.power_on is True
+  assert status.current_temperature == 29.3
+  assert status.target_temperature == 29.3
+  assert status.swing_horizontal is True
+  assert status.swing_vertical is True
+  assert status.ha_climate_preview is not None
+  assert status.ha_climate_preview.entity_domain == "climate"
+  assert status.ha_climate_preview.available is False
+  assert status.ha_climate_preview.swing_mode == "both"
+  assert status.ha_climate_preview.hvac_mode is None
+  assert "设备当前离线" in " ".join(status.ha_climate_preview.notes)
+
+  compact_payload = _air_conditioner_status_payload(status, include_raw=False)
+  assert "raw_device" not in compact_payload
+  assert "raw_status" not in compact_payload
+
+  debug_payload = _air_conditioner_status_payload(status, include_raw=True)
+  assert "raw_device" in debug_payload
+  assert "raw_status" in debug_payload

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+from .models import CaptchaBridgeResult
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -155,12 +156,6 @@ HTML_TEMPLATE = """<!doctype html>
 </body>
 </html>
 """
-
-
-@dataclass(slots=True)
-class CaptchaBridgeResult:
-  token: str
-
 
 class _ThreadedHTTPServer(ThreadingHTTPServer):
   daemon_threads = True

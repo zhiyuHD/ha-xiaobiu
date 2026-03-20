@@ -6,10 +6,24 @@ from .client import (
   main,
   parse_jsonp_or_json,
 )
+from .models import (
+  AirConditionerStatus,
+  AuthState,
+  CaptchaSolution,
+  HAClimatePreview,
+  LoginPageConfig,
+  SignedRequestTemplate,
+)
 
 __all__ = [
+  "AirConditionerStatus",
+  "AuthState",
   "AuthenticationError",
   "CaptchaRequiredError",
+  "CaptchaSolution",
+  "HAClimatePreview",
+  "LoginPageConfig",
+  "SignedRequestTemplate",
   "SuningError",
   "SuningSmartHomeClient",
   "main",
