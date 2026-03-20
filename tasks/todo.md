@@ -1,5 +1,42 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA SMS Submit Failure Investigation
+
+### Plan
+
+- [x] 解析 `ha1.har`，提取短信验证码提交前后以及失败后重新添加集成的关键 flow 请求与响应
+- [x] 对照当前 HA config flow / runtime 状态管理，确认“连接苏宁失败”的实际触发点
+- [x] 实现最小修复，并补充覆盖该问题的回归测试
+- [x] 运行定向验证并回填 tasks / lessons
+
+### Notes
+
+- `ha1.har` 没有录到“短信验证码提交”那一段，只录到了失败后的重新添加流程
+- 失败后的两次 `POST /api/config/config_entries/flow/{flow_id}` 都停留在 `user` 第一步，并直接返回 `errors.base = cannot_connect`
+- 这说明问题在重新发送短信之前就已经出现；结合当前代码，唯一会跨尝试持久化并在 `user` 步骤开始前被重新加载的，就是 `.storage/suning_biu_<code>_<phone>.json`
+- 当前 `SuningSmartHomeClient` 在构造时默认 `load_state()`，会把上一次失败流程留下的 cookies 和登录态一起带进新的 HA config flow；之前只清空 `risk_type/sms_ticket/login_ticket` 还不够，旧 cookies 仍可能污染新的短信登录尝试
+
+### Review
+
+- 已更新 `src/suning_biu_ha/client.py` 与 vendored 副本
+  - `SuningSmartHomeClient.__init__()` 新增 `load_state` 参数，默认仍为 `True`
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - HA config flow 初始化登录 client 时显式传入 `load_state=False`
+  - 这样新的 user/reauth 登录尝试会复用同一个 state 文件路径做后续保存，但不会先加载旧 session/cookies
+- 已更新测试
+  - `tests/test_home_assistant_component.py` 现在覆盖：新 HA flow 启动时不会加载旧持久化 session，只会从干净 session 开始，再清理短信临时状态
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- `ha1.har` 没录到短信提交失败瞬间，所以“短信提交后出现 cannot_connect”这一半结论仍是基于代码路径和后续重试行为做的工程推断
+- 如果用户在更新后仍然能复现“短信提交后 cannot_connect”，下一步就需要补 HA 服务器日志，确认是 `list_family_infos()`、`list_air_conditioner_statuses()` 还是别的苏宁接口失败
+
 ## HA HAR IAR Loop Investigation
 
 ### Plan

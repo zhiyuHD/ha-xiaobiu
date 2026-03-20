@@ -191,8 +191,9 @@ async def test_user_step_clears_stale_sms_login_state_before_starting_new_flow(
   created_clients: list[Any] = []
 
   class FakeClient:
-    def __init__(self, *, state_path: Path) -> None:
+    def __init__(self, *, state_path: Path, load_state: bool = True) -> None:
       self.state_path = state_path
+      self.load_state = load_state
       self.state = SimpleNamespace(
         phone_number="13800000000",
         international_code="0086",
@@ -200,6 +201,7 @@ async def test_user_step_clears_stale_sms_login_state_before_starting_new_flow(
         sms_ticket="stale-sms-ticket",
         login_ticket="stale-login-ticket",
       )
+      self.session = SimpleNamespace(cookies=["stale-cookie"] if load_state else [])
       self.risk_context_script_urls = []
       self.reset_calls = 0
       created_clients.append(self)
@@ -220,6 +222,8 @@ async def test_user_step_clears_stale_sms_login_state_before_starting_new_flow(
       assert phone_number == "13800000000"
       assert international_code == "0086"
       assert captcha is None
+      assert self.load_state is False
+      assert self.session.cookies == []
       assert self.state.risk_type is None
       assert self.state.sms_ticket is None
       assert self.state.login_ticket is None
@@ -260,6 +264,7 @@ async def test_user_step_clears_stale_sms_login_state_before_starting_new_flow(
   assert result["type"] == "external"
   assert result["step_id"] == "captcha"
   assert len(created_clients) == 1
+  assert created_clients[0].load_state is False
   assert created_clients[0].reset_calls == 1
   assert created_clients[0].state_path == (
     tmp_path / ".storage" / "suning_biu_0086_13800000000.json"

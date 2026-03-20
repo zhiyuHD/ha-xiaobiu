@@ -298,6 +298,7 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._international_code,
         self._phone_number,
       ),
+      load_state=False,
     )
     self._client.state.phone_number = self._phone_number
     self._client.state.international_code = self._international_code

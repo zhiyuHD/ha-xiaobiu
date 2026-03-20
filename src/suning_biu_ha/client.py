@@ -313,6 +313,7 @@ class SuningSmartHomeClient:
     *,
     state_path: str | Path | None = None,
     har_path: str | Path | None = None,
+    load_state: bool = True,
     detect: str | None = None,
     dfp_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
@@ -341,7 +342,7 @@ class SuningSmartHomeClient:
       self.state.detect = detect
     if dfp_token:
       self.state.dfp_token = dfp_token
-    if self.state_path and self.state_path.exists():
+    if load_state and self.state_path and self.state_path.exists():
       self.load_state()
     if self.har_path:
       self.load_signed_templates()
