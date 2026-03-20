@@ -13,7 +13,6 @@ from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig,
 from .iar_external_view import (
   async_create_iar_captcha_session,
   async_get_iar_captcha_session,
-  async_pop_iar_captcha_session,
   async_remove_iar_captcha_session,
 )
 from . import session_state_path
@@ -58,16 +57,7 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
       elif error_key is not None:
         errors["base"] = error_key
 
-    return self.async_show_form(
-      step_id="user",
-      data_schema=vol.Schema(
-        {
-          vol.Required(CONF_PHONE_NUMBER): str,
-          vol.Required(CONF_INTERNATIONAL_CODE, default=self._international_code): str,
-        }
-      ),
-      errors=errors,
-    )
+    return self._show_user_form(errors)
 
   async def async_step_reauth(
     self,
@@ -150,16 +140,23 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     if not session.result.detect or not session.result.dfp_token:
       self._clear_iar_captcha_session()
       return self.async_abort(reason="captcha_risk_context_missing")
-    session = async_pop_iar_captcha_session(self.hass, self.flow_id)
-    if session is None or session.result is None:
-      return self.async_abort(reason="captcha_session_expired")
+    session_nonce = session.nonce
     self._client.update_risk_context(
       detect=session.result.detect,
       dfp_token=session.result.dfp_token,
     )
-    return await self._async_send_sms(
-      client_lib.CaptchaSolution(kind="iar", value=session.result.token)
-    )
+    try:
+      result = await self._async_send_sms(
+        client_lib.CaptchaSolution(kind="iar", value=session.result.token)
+      )
+    except client_lib.SuningError:
+      # Keep the finished IAR session around so the current external-step URL
+      # does not immediately degrade into a 404 if the resumed SMS request fails.
+      return self._show_user_form({"base": "cannot_connect"})
+    current_session = async_get_iar_captcha_session(self.hass, self.flow_id)
+    if current_session is not None and current_session.nonce == session_nonce:
+      async_remove_iar_captcha_session(self.hass, self.flow_id)
+    return result
 
   async def async_step_sms_code(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
     errors: dict[str, str] = {}
@@ -318,6 +315,18 @@ class SuningConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
           )
         )
       }
+    )
+
+  def _show_user_form(self, errors: dict[str, str]) -> ConfigFlowResult:
+    return self.async_show_form(
+      step_id="user",
+      data_schema=vol.Schema(
+        {
+          vol.Required(CONF_PHONE_NUMBER, default=self._phone_number or ""): str,
+          vol.Required(CONF_INTERNATIONAL_CODE, default=self._international_code): str,
+        }
+      ),
+      errors=errors,
     )
 
   def _entry_title(self, family_name: str) -> str:

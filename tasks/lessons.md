@@ -17,3 +17,4 @@
 - 对需要持久化会话的登录 runtime，不能把 `risk_type`、`sms_ticket`、`login_ticket` 这类短信登录瞬时状态无差别复用于下一次 HA config flow；新登录流程启动前必须主动清空这些临时票据，否则用户会看到“本轮滑块已通过，但服务端继续要求新一轮 IAR”
 - HA config flow 的“重新开始登录”不能默认加载旧 `.storage` session；哪怕已经清掉短信 ticket，只要旧 cookies 和半登录态还在，新的一轮手机号提交也可能直接 `cannot_connect`。新的登录 flow 应从干净 session 启动，只把 state 文件当作本轮成功后的保存目标
 - 逆向 live app API 时，不能把返回字段名想当然写死在 parser 里；像家庭列表这种接口，线上可能返回 `id` 而不是 `familyId`。一旦 parser 把成功响应误判成格式错误，HA 里就只会表现成模糊的 `cannot_connect`
+- Home Assistant external step 的能力 URL 不能在“恢复后的工作真正完成之前”就提前销毁；否则一旦 `captcha_done` 之类的恢复步骤里抛异常，用户会先看到 flow 500，再看到旧 external-step URL 退化成 `captcha session not found`

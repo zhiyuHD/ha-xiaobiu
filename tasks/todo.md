@@ -1,5 +1,44 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA Captcha Session Not Found Regression
+
+### Plan
+
+- [x] 解析 `ha5.har`，提取 IAR external step 的完整 GET / POST / flow 恢复链路
+- [x] 确认 `{"message":"captcha session not found"}` 是在哪一跳触发，以及是否属于回归
+- [x] 对照当前 IAR session 生命周期代码，定位根因并实现最小修复
+- [x] 补回归测试、运行定向验证并回填 tasks / lessons
+
+### Notes
+
+- `ha5.har` 显示的真实顺序是：
+  - `GET /api/suning_biu/iar/...` 返回 200，验证码页正常加载
+  - `POST /api/suning_biu/iar/...` 返回 `{"ok":true}`，说明浏览器回调成功
+  - 随后的 `GET /api/config/config_entries/flow/{flow_id}` 返回 500
+  - 之后同一个 IAR URL 再次 `GET` 才返回 `{"message":"captcha session not found"}`
+- 这说明 `captcha session not found` 不是第一现场，它只是 flow 已经炸掉后的后果
+- 当前 `async_step_captcha_done()` 会在真正完成恢复短信流程之前先 `pop` 掉 IAR session；一旦后续 `_async_send_sms(...)` 抛 `SuningError`，flow 就直接 500，而旧 external-step URL 已经变成 404
+
+### Review
+
+- 已更新 `custom_components/suning_biu/config_flow.py`
+  - `captcha_done` 不再在恢复成功前就移除 IAR session
+  - 如果恢复发送短信阶段抛 `SuningError`，现在会回到带 `cannot_connect` 的 `user` 表单，而不是 500
+  - 只有当恢复流程成功推进后，才会清掉当前 IAR session
+- 已更新测试
+  - `tests/test_home_assistant_component.py` 新增回归用例，覆盖 `captcha_done` 出错时不会丢失 session，也不会把 flow 炸成未处理异常
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_client.py tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- 这次修的是 external-step 恢复阶段的错误处理和 session 生命周期；如果 `_async_send_sms(...)` 背后的苏宁接口本身持续失败，用户现在会回到可重试表单，而不是 500，但仍需要继续定位底层接口失败原因
+- `ha5.har` 没有包含 HA 服务器日志，所以导致 `_async_send_sms(...)` 抛错的底层具体异常种类仍未从日志层面验证
+
 ## HA Full Flow Cannot Connect Investigation
 
 ### Plan

@@ -583,6 +583,72 @@ async def test_iar_captcha_done_aborts_when_risk_context_is_missing(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_iar_captcha_done_handles_send_sms_error_without_dropping_session(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class SuningError(Exception):
+    pass
+
+  class FakeClient:
+    def __init__(self) -> None:
+      self.risk_updates: list[tuple[str | None, str | None]] = []
+
+    def update_risk_context(self, *, detect: str | None = None, dfp_token: str | None = None) -> None:
+      self.risk_updates.append((detect, dfp_token))
+
+    def send_sms_code(
+      self,
+      phone_number: str,
+      *,
+      international_code: str | None = None,
+      captcha: Any | None = None,
+    ) -> None:
+      assert phone_number == "13800000000"
+      assert international_code == "0086"
+      assert captcha is not None
+      raise SuningError("send sms failed")
+
+  flow = SuningConfigFlow()
+  flow.hass = HomeAssistant(str(tmp_path))
+  flow.hass.http = FakeHTTP()
+  flow.context = {"source": config_entries.SOURCE_USER}
+  flow.flow_id = "flow-123"
+  flow._captcha_kind = "iar"
+  flow._client = FakeClient()
+  flow._phone_number = "13800000000"
+  flow._international_code = "0086"
+
+  session = async_create_iar_captcha_session(
+    flow.hass,
+    flow_id="flow-123",
+    ticket="ticket-123",
+  )
+  session.result = IARCaptchaResult(
+    token="iar-token",
+    detect="browser-detect",
+    dfp_token="browser-dfp",
+  )
+
+  monkeypatch.setattr(
+    "custom_components.suning_biu.config_flow.load_client_lib",
+    lambda: SimpleNamespace(
+      SuningError=SuningError,
+      CaptchaRequiredError=type("CaptchaRequiredError", (Exception,), {}),
+      CaptchaSolution=lambda **kwargs: SimpleNamespace(**kwargs),
+    ),
+  )
+
+  result = await flow.async_step_captcha_done()
+
+  assert result["type"] == "form"
+  assert result["step_id"] == "user"
+  assert result["errors"] == {"base": "cannot_connect"}
+  assert async_get_iar_captcha_session(flow.hass, "flow-123") is not None
+  assert flow._client.risk_updates == [("browser-detect", "browser-dfp")]
+
+
+@pytest.mark.asyncio
 async def test_iar_captcha_view_serves_page_and_triggers_flow_resume(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path: Path,
