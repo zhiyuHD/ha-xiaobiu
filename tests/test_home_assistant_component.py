@@ -587,6 +587,67 @@ async def test_iar_captcha_view_rejects_missing_risk_context(tmp_path: Path) -> 
   assert async_get_iar_captcha_session(hass, "flow-123") is not None
 
 
+@pytest.mark.asyncio
+async def test_iar_captcha_view_ignores_duplicate_success_callbacks(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  hass = HomeAssistant(str(tmp_path))
+  hass.http = FakeHTTP()
+  resumed_flows: list[str] = []
+  created_tasks: list[Any] = []
+
+  async def fake_async_configure(*, flow_id: str) -> None:
+    resumed_flows.append(flow_id)
+
+  monkeypatch.setattr(
+    hass,
+    "async_create_task",
+    lambda coro, *args, **kwargs: created_tasks.append(coro),
+  )
+  hass.config_entries = SimpleNamespace(
+    flow=SimpleNamespace(async_configure=fake_async_configure)
+  )
+
+  session = async_create_iar_captcha_session(
+    hass,
+    flow_id="flow-123",
+    ticket="ticket-123",
+  )
+
+  class FakeRequest:
+    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+      self.app = {KEY_HASS: hass}
+      self._payload = payload or {}
+
+    async def json(self) -> dict[str, Any]:
+      return self._payload
+
+  view = SuningIARCaptchaView()
+  payload = {
+    "token": "iar-token",
+    "detect": "browser-detect",
+    "dfpToken": "browser-dfp",
+  }
+  first_response = await view.post(
+    FakeRequest(payload),
+    flow_id="flow-123",
+    nonce=session.nonce,
+  )
+  second_response = await view.post(
+    FakeRequest(payload),
+    flow_id="flow-123",
+    nonce=session.nonce,
+  )
+
+  assert first_response.status == 200
+  assert second_response.status == 200
+  assert session.resume_requested is True
+  assert len(created_tasks) == 1
+  await created_tasks[0]
+  assert resumed_flows == ["flow-123"]
+
+
 def test_climate_entity_exposes_expected_state() -> None:
   status = SimpleNamespace(
     device_id="ac-1",

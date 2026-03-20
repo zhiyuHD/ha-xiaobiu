@@ -1,5 +1,43 @@
 # 苏宁小 biu 智家短信登录接入任务
 
+## HA IAR Duplicate Resume Guard
+
+### Plan
+
+- [x] 检查当前 IAR external step 恢复链路和 HA 对 external step 的刷新行为，定位重复打开页面的根因
+- [x] 增加浏览器端与服务端的幂等保护，确保单次 IAR 成功只恢复一次 flow
+- [x] 补充回归测试并运行定向验证
+- [x] 回填 tasks 文档与 lessons，总结根因和边界
+
+### Notes
+
+- 根据 HA flow manager 的行为，`external step` 刷新后前端会重新拉取 flow 状态，而同一轮 IAR 成功回调如果被重复触发，就会放大成多次 `async_configure(flow_id)` 续跑
+- 结合当前实现，最可疑的源头是验证码页 success callback 缺少幂等保护；同一次拼图成功可能触发多次 POST，从而导致多次恢复 flow
+
+### Review
+
+- 已更新 `src/suning_biu_ha/captcha_bridge.py` 与 vendored 副本
+  - 新增前端侧 `captchaSubmitStarted`，同一轮 success callback 只允许提交一次
+  - 若回传失败，会释放该标记，允许用户重试
+- 已更新 `custom_components/suning_biu/iar_external_view.py`
+  - `IARCaptchaSession` 新增 `resume_requested`
+  - 服务端收到重复 success POST 时直接返回 `{ok: true, duplicate: true}`，不再重复调度 `async_configure(flow_id)`
+- 已更新测试
+  - `tests/test_captcha_bridge.py` 断言桥接页包含前端去重开关
+  - `tests/test_home_assistant_component.py` 覆盖 HA view 对重复 success callback 只恢复一次 flow
+
+### Verification
+
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_captcha_bridge.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest tests/test_home_assistant_component.py -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/tmp/uv-suning-ha-check uv run --group dev --python 3.14 --with 'homeassistant==2026.3.2' python -m pytest -q`
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall custom_components/suning_biu src/suning_biu_ha tests`
+
+### Risks
+
+- 这里的根因判断是基于 HA flow 刷新机制和当前代码路径做出的工程推断；如果后续仍出现重复页面，需要补浏览器网络日志确认前端是否真的发出了多次 success POST
+- 本轮修的是“单次成功回调的幂等性”，不改变苏宁自身 IAR 脚本是否会二次触发 UI 的行为
+
 ## HA IAR Repeat Loop Fix
 
 ### Plan

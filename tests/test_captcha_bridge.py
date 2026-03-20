@@ -19,6 +19,7 @@ def test_local_captcha_bridge_serves_ticket_and_accepts_callback() -> None:
     assert "window.__RISK_CONTEXT_SCRIPT_URLS__" in html
     assert "mmds.suning.com/mmds/mmds.js" in html
     assert "未能采集浏览器风控上下文" in html
+    assert "captchaSubmitStarted" in html
 
     request = Request(
       bridge.url + "callback",

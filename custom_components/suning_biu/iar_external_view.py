@@ -36,6 +36,7 @@ class IARCaptchaSession:
   )
   env: str = "prd"
   result: IARCaptchaResult | None = None
+  resume_requested: bool = False
 
   @property
   def path(self) -> str:
@@ -149,10 +150,13 @@ class SuningIARCaptchaView(HomeAssistantView):
       return self.json_message("missing token", HTTPStatus.BAD_REQUEST)
     if not detect or not dfp_token:
       return self.json_message("missing risk context", HTTPStatus.BAD_REQUEST)
+    if session.resume_requested:
+      return self.json({"ok": True, "duplicate": True})
     session.result = IARCaptchaResult(
       token=token,
       detect=detect,
       dfp_token=dfp_token,
     )
+    session.resume_requested = True
     hass.async_create_task(hass.config_entries.flow.async_configure(flow_id=flow_id))
     return self.json({"ok": True})

@@ -176,6 +176,7 @@ HTML_TEMPLATE = """<!doctype html>
       statusEl.textContent = message;
       statusEl.className = "status" + (klass ? " " + klass : "");
     }}
+    let captchaSubmitStarted = false;
     const captchaSize = computeCaptchaSize();
     const captchaEl = document.getElementById("captcha");
     captchaEl.style.width = captchaSize.width;
@@ -189,6 +190,10 @@ HTML_TEMPLATE = """<!doctype html>
       width: captchaSize.width,
       height: captchaSize.height,
       callback: async function(token) {{
+        if (captchaSubmitStarted) {{
+          return;
+        }}
+        captchaSubmitStarted = true;
         try {{
           setStatus("验证成功，正在回传结果...", "");
           const riskContext = await riskContextPromise;
@@ -211,6 +216,7 @@ HTML_TEMPLATE = """<!doctype html>
           }}
           setStatus("验证成功，已经回传给本地程序。可以回到终端继续。", "ok");
         }} catch (error) {{
+          captchaSubmitStarted = false;
           setStatus("验证码已完成，但回传失败，请把浏览器和终端错误一起反馈。\\n" + error, "err");
         }}
       }},
