@@ -11,6 +11,22 @@
 
 ## 安装
 
+**一键安装（在 Home Assistant 终端中执行）：**
+
+```bash
+wget -q -O - https://raw.githubusercontent.com/FaintGhost/ha-xiaobiu/main/install.sh | bash -
+```
+
+安装指定版本：
+
+```bash
+wget -q -O - https://raw.githubusercontent.com/FaintGhost/ha-xiaobiu/main/install.sh | ARCHIVE_TAG=v0.1.5 bash -
+```
+
+安装完成后重启 Home Assistant，进入 **设置 → 设备与服务 → 添加集成**，搜索 **Xiaobiu**。
+
+**手动安装：**
+
 1. 将 `custom_components/xiaobiu` 复制到 Home Assistant 配置目录的 `custom_components/` 下。
 2. 重启 Home Assistant。
 3. 进入 **设置 → 设备与服务 → 添加集成**，搜索 **Xiaobiu**。
