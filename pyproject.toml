@@ -1,14 +1,15 @@
 [project]
 name = "ha-xiaobiu"
-version = "0.1.6"
+version = "0.0.1"
 description = "Home Assistant custom integration for Xiaobiu (苏宁小biu) smart home devices"
 readme = "README.md"
 authors = [
-  { name = "FaintGhost", email = "zhang.yaowei@live.com" }
+  { name = "FaintGhost", email = "zhang.yaowei@live.com" },
+  { name = "zhiyuHD", email = "zhiyuxl@outlook.com" }
 ]
 requires-python = ">=3.14"
 dependencies = [
-  "python-xiaobiu>=0.1.1",
+  "xiaobiu-python>=0.0.1",
 ]
 
 [dependency-groups]
