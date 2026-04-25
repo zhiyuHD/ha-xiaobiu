@@ -83,7 +83,6 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         1. Cached value from previous fetch
         2. raw_device from status (if available)
         3. Direct API call to list_devices
-        4. From entry data (if stored during setup)
         """
         # 1. Return cached value if already fetched
         if self._model_id_fetched:
@@ -123,7 +122,6 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
                         if model_id:
                             self._cached_model_id = model_id
                             self._model_id_fetched = True
-                            # Cache to coordinator for other entities
                             if not hasattr(self.coordinator, "device_cache"):
                                 self.coordinator.device_cache = {}
                             self.coordinator.device_cache[self._device_id] = device
@@ -213,7 +211,7 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
             "online": status.online,
         }
 
-    # ========== Control Methods ==========
+    # ========== Control Methods with Optimistic Updates ==========
 
     async def async_turn_on(self) -> None:
         """Turn the device on."""
@@ -221,13 +219,23 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         if not model_id:
             _LOGGER.error("Cannot turn on: model_id is None")
             return
+        
+        # 乐观更新：立即改变本地状态
+        if hasattr(self._status, "power_on") and not self._status.power_on:
+            self._status.power_on = True
+            self.async_write_ha_state()
+            _LOGGER.debug("Optimistic update: turned on")
+        
+        # 发送指令
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_air_conditioner_power,
             self._device_id,
             model_id,
             True,
         )
-        await self.coordinator.async_request_refresh()
+        
+        # 后台刷新实际状态（最终一致性）
+        self.hass.async_create_task(self.coordinator.async_request_refresh())
 
     async def async_turn_off(self) -> None:
         """Turn the device off."""
@@ -235,30 +243,52 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         if not model_id:
             _LOGGER.error("Cannot turn off: model_id is None")
             return
+        
+        # 乐观更新：立即改变本地状态
+        if hasattr(self._status, "power_on") and self._status.power_on:
+            self._status.power_on = False
+            self.async_write_ha_state()
+            _LOGGER.debug("Optimistic update: turned off")
+        
+        # 发送指令
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_air_conditioner_power,
             self._device_id,
             model_id,
             False,
         )
-        await self.coordinator.async_request_refresh()
+        
+        # 后台刷新实际状态
+        self.hass.async_create_task(self.coordinator.async_request_refresh())
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set target temperature."""
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
+        
         model_id = self._model_id
         if not model_id:
             _LOGGER.error("Cannot set temperature: model_id is None")
             return
+        
+        # 乐观更新：立即改变本地温度
+        if hasattr(self._status, "target_temperature"):
+            old_temp = self._status.target_temperature
+            self._status.target_temperature = temperature
+            self.async_write_ha_state()
+            _LOGGER.debug("Optimistic update: temperature from %s to %s", old_temp, temperature)
+        
+        # 发送指令
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_air_conditioner_temperature,
             self._device_id,
             model_id,
             temperature,
         )
-        await self.coordinator.async_request_refresh()
+        
+        # 后台刷新实际状态
+        self.hass.async_create_task(self.coordinator.async_request_refresh())
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set HVAC mode."""
@@ -269,16 +299,16 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
             _LOGGER.error("Cannot set mode: model_id is None")
             return
         
-        # If turning off
+        # 处理关机
         if hvac_mode == HVACMode.OFF:
             await self.async_turn_off()
             return
         
-        # Ensure device is on
+        # 确保设备开机
         if not self._status.power_on:
             await self.async_turn_on()
         
-        # Map HVACMode to Suning mode_raw values
+        # 映射 HVACMode 到苏宁的 mode_raw 值
         # 1=自动, 2=制冷, 3=制热, 4=送风, 5=除湿
         mode_map = {
             HVACMode.AUTO: "1",
@@ -292,11 +322,20 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
             _LOGGER.warning("Unknown HVAC mode: %s", hvac_mode)
             return
         
-        _LOGGER.debug("Sending mode command: SN_MODE=%s", mode_raw)
+        # 乐观更新：立即改变本地模式
+        if hasattr(self._status, "mode_raw"):
+            old_mode = self._status.mode_raw
+            self._status.mode_raw = mode_raw
+            self.async_write_ha_state()
+            _LOGGER.debug("Optimistic update: mode from %s to %s", old_mode, mode_raw)
+        
+        # 发送指令
         await self.hass.async_add_executor_job(
             self.coordinator.client.control_air_conditioner,
             self._device_id,
             model_id,
             {"SN_MODE": mode_raw},
         )
-        await self.coordinator.async_request_refresh()
+        
+        # 后台刷新实际状态
+        self.hass.async_create_task(self.coordinator.async_request_refresh())
