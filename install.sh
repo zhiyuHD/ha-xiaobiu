@@ -4,7 +4,7 @@
 set -e
 
 [ -z "$DOMAIN" ] && DOMAIN="xiaobiu"
-[ -z "$REPO_PATH" ] && REPO_PATH="FaintGhost/ha-xiaobiu"
+[ -z "$REPO_PATH" ] && REPO_PATH="zhiyuHD/ha-xiaobiu"
 REPO_NAME=$(basename "$REPO_PATH")
 
 [ -z "$ARCHIVE_TAG" ] && ARCHIVE_TAG="$1"
