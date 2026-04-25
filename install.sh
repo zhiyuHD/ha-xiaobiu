@@ -10,7 +10,8 @@ REPO_NAME=$(basename "$REPO_PATH")
 [ -z "$ARCHIVE_TAG" ] && ARCHIVE_TAG="$1"
 [ -z "$ARCHIVE_TAG" ] && ARCHIVE_TAG="main"
 [ -z "$HUB_DOMAIN" ] && HUB_DOMAIN="github.com"
-ARCHIVE_URL="https://$HUB_DOMAIN/$REPO_PATH/archive/$ARCHIVE_TAG.zip"
+[ -z "$MIRROR_DOMAIN" ] && MIRROR_DOMAIN="https://gh.felicity.ac.cn"
+ARCHIVE_URL="$MIRROR_DOMAIN/https://$HUB_DOMAIN/$REPO_PATH/archive/$ARCHIVE_TAG.zip"
 
 RED_COLOR='\033[0;31m'
 GREEN_COLOR='\033[0;32m'
