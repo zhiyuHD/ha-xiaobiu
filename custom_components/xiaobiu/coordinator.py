@@ -34,11 +34,26 @@ class SuningDataUpdateCoordinator(DataUpdateCoordinator[dict[str, object]]):
     )
     self.client = client
     self.family_id = family_id
+    # 缓存设备原始信息（包含 model_id）
+    self.device_cache: dict[str, dict] = {}
 
   async def _async_update_data(self) -> dict[str, object]:
     client_lib = load_client_lib()
     try:
       await self.hass.async_add_executor_job(self.client.keep_alive)
+      
+      # 获取设备列表并缓存原始信息
+      devices_response = await self.hass.async_add_executor_job(
+        self.client.list_devices,
+        self.family_id,
+      )
+      devices = devices_response.get("responseData", {}).get("devices", [])
+      for device in devices:
+        device_id = device.get("id")
+        if device_id:
+          self.device_cache[device_id] = device
+      
+      # 获取设备状态
       statuses = await self.hass.async_add_executor_job(
         self.client.list_air_conditioner_statuses,
         self.family_id,
@@ -63,3 +78,7 @@ class SuningDataUpdateCoordinator(DataUpdateCoordinator[dict[str, object]]):
   @property
   def statuses(self) -> Mapping[str, object]:
     return self.data
+  
+  def get_device_info(self, device_id: str) -> dict | None:
+    """获取设备原始信息"""
+    return self.device_cache.get(device_id)

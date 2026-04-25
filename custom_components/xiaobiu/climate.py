@@ -67,6 +67,8 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         self._entry = entry
         self._device_id = device_id
         self._attr_unique_id = f"{entry.entry_id}_{device_id}"
+        self._cached_model_id: str | None = None
+        self._model_id_fetched: bool = False
 
     @property
     def _status(self) -> Any:
@@ -75,10 +77,63 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
 
     @property
     def _model_id(self) -> str | None:
-        """Get model_id for control API."""
+        """Get model_id for control API.
+        
+        Tries multiple sources in order of preference:
+        1. Cached value from previous fetch
+        2. raw_device from status (if available)
+        3. Direct API call to list_devices
+        4. From entry data (if stored during setup)
+        """
+        # 1. Return cached value if already fetched
+        if self._model_id_fetched:
+            return self._cached_model_id
+        
+        # 2. Try to get from status.raw_device
         raw_device = getattr(self._status, "raw_device", None)
         if raw_device:
-            return raw_device.get("modelId")
+            model_id = raw_device.get("modelId") or raw_device.get("model")
+            if model_id:
+                self._cached_model_id = model_id
+                self._model_id_fetched = True
+                _LOGGER.debug("Got model_id from raw_device: %s", model_id)
+                return model_id
+        
+        # 3. Try to get from coordinator's device cache
+        if hasattr(self.coordinator, "device_cache"):
+            device_info = self.coordinator.device_cache.get(self._device_id)
+            if device_info:
+                model_id = device_info.get("modelId") or device_info.get("model")
+                if model_id:
+                    self._cached_model_id = model_id
+                    self._model_id_fetched = True
+                    _LOGGER.debug("Got model_id from device_cache: %s", model_id)
+                    return model_id
+        
+        # 4. Direct API call to list_devices (fallback)
+        try:
+            family_id = self._entry.data.get(CONF_FAMILY_ID)
+            if family_id:
+                _LOGGER.debug("Fetching device list to get model_id for %s", self._device_id)
+                devices_response = self.coordinator.client.list_devices(family_id)
+                devices = devices_response.get("responseData", {}).get("devices", [])
+                for device in devices:
+                    if device.get("id") == self._device_id:
+                        model_id = device.get("modelId") or device.get("model")
+                        if model_id:
+                            self._cached_model_id = model_id
+                            self._model_id_fetched = True
+                            # Cache to coordinator for other entities
+                            if not hasattr(self.coordinator, "device_cache"):
+                                self.coordinator.device_cache = {}
+                            self.coordinator.device_cache[self._device_id] = device
+                            _LOGGER.debug("Got model_id from API: %s", model_id)
+                            return model_id
+        except Exception as e:
+            _LOGGER.warning("Failed to fetch model_id from API: %s", e)
+        
+        # 5. Could not get model_id
+        _LOGGER.warning("Unable to get model_id for device %s", self._device_id)
         return None
 
     @property
@@ -162,26 +217,28 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
 
     async def async_turn_on(self) -> None:
         """Turn the device on."""
-        if not self._model_id:
-            _LOGGER.warning("Cannot turn on: model_id is None")
+        model_id = self._model_id
+        if not model_id:
+            _LOGGER.error("Cannot turn on: model_id is None")
             return
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_air_conditioner_power,
             self._device_id,
-            self._model_id,
+            model_id,
             True,
         )
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self) -> None:
         """Turn the device off."""
-        if not self._model_id:
-            _LOGGER.warning("Cannot turn off: model_id is None")
+        model_id = self._model_id
+        if not model_id:
+            _LOGGER.error("Cannot turn off: model_id is None")
             return
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_air_conditioner_power,
             self._device_id,
-            self._model_id,
+            model_id,
             False,
         )
         await self.coordinator.async_request_refresh()
@@ -191,13 +248,14 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
-        if not self._model_id:
-            _LOGGER.warning("Cannot set temperature: model_id is None")
+        model_id = self._model_id
+        if not model_id:
+            _LOGGER.error("Cannot set temperature: model_id is None")
             return
         await self.hass.async_add_executor_job(
             self.coordinator.client.set_air_conditioner_temperature,
             self._device_id,
-            self._model_id,
+            model_id,
             temperature,
         )
         await self.coordinator.async_request_refresh()
@@ -206,8 +264,9 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         """Set HVAC mode."""
         _LOGGER.debug("Setting HVAC mode to: %s", hvac_mode)
         
-        if not self._model_id:
-            _LOGGER.warning("Cannot set mode: model_id is None")
+        model_id = self._model_id
+        if not model_id:
+            _LOGGER.error("Cannot set mode: model_id is None")
             return
         
         # If turning off
@@ -237,7 +296,7 @@ class SuningClimateEntity(CoordinatorEntity[SuningDataUpdateCoordinator], Climat
         await self.hass.async_add_executor_job(
             self.coordinator.client.control_air_conditioner,
             self._device_id,
-            self._model_id,
+            model_id,
             {"SN_MODE": mode_raw},
         )
         await self.coordinator.async_request_refresh()
