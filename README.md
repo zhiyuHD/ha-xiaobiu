@@ -14,13 +14,7 @@
 **一键安装（在 Home Assistant 终端中执行）：**
 
 ```bash
-wget -q -O - https://raw.githubusercontent.com/FaintGhost/ha-xiaobiu/main/install.sh | bash -
-```
-
-安装指定版本：
-
-```bash
-wget -q -O - https://raw.githubusercontent.com/FaintGhost/ha-xiaobiu/main/install.sh | ARCHIVE_TAG=v0.1.6 bash -
+wget -q -O - https://raw.githubusercontent.com/zhiyuHD/ha-xiaobiu/main/install.sh | bash -
 ```
 
 安装完成后重启 Home Assistant，进入 **设置 → 设备与服务 → 添加集成**，搜索 **Xiaobiu**。
@@ -50,7 +44,7 @@ wget -q -O - https://raw.githubusercontent.com/FaintGhost/ha-xiaobiu/main/instal
 
 ## 协议库
 
-本集成基于 [python-xiaobiu](https://pypi.org/project/python-xiaobiu/) 实现，也可独立使用：
+本集成基于 [xiaobiu-python](https://pypi.org/project/xiaobiu-python/) 实现，也可独立使用：
 
 ```python
 from xiaobiu import SuningSmartHomeClient
